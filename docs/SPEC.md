@@ -627,8 +627,10 @@ swallows short words.
 3 s, the engine keeps the audio and, before yielding the final text, scores it with FluidAudio's
 Silero speech detector (`VadManager`, loaded with the Parakeet models); when no 256 ms window
 reaches `SpeechEvidence.threshold` (0.7, `SottoText`), the final text is empty and nothing is
-typed. Measured 2026-09-27: silent holds peaked at 0.10–0.56, soft one-word answers at
-0.96–1.00, and the check took about 2 ms. Longer holds, a detector that failed to load, or a
+typed. The first window is left out whenever later ones exist: it holds Sotto's own start
+sound and the key click, which scored 0.94 on one silent hold. Measured 2026-09-27 on 18
+silent holds and 16 one-word answers: with the first window left out, silent holds peaked at
+0.02–0.46 and answers at 0.86–1.00; the check took about 2 ms. Longer holds, a detector that failed to load, or a
 detector error keep the text (logged). This is a speech model, not a loudness gate.
 
 **Press while ending**: a press that arrives while the session is terminating (the user

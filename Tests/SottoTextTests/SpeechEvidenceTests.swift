@@ -20,12 +20,30 @@ struct SpeechEvidenceTests {
         #expect(!SpeechEvidence.isSilent(windows))
     }
 
-    @Test func oneConfidentWindowIsEnough() {
+    @Test func oneConfidentWindowAfterTheFirstIsEnough() {
         #expect(!SpeechEvidence.isSilent([0.01, 0.70, 0.01]))
     }
 
     @Test func justUnderTheThresholdIsSilent() {
         #expect(SpeechEvidence.isSilent([0.01, 0.69, 0.01]))
+    }
+
+    /// The first window holds Sotto's own start sound and the key click, which once scored
+    /// 0.94 on a silent hold (2026-09-27). It is ignored whenever later windows exist.
+    @Test func theFirstWindowAloneIsNotSpeech() {
+        #expect(SpeechEvidence.isSilent([0.94, 0.46]))
+        #expect(SpeechEvidence.isSilent([0.63, 0.11, 0.06]))
+    }
+
+    @Test func aSingleWindowIsJudgedOnItsOwn() {
+        #expect(!SpeechEvidence.isSilent([0.94]))
+        #expect(SpeechEvidence.isSilent([0.30]))
+    }
+
+    @Test func realSpeechAfterTheFirstWindowStillCounts() {
+        #expect(!SpeechEvidence.isSilent([0.63, 1.00, 1.00, 0.32]))
+        #expect(!SpeechEvidence.isSilent([0.53, 0.68, 0.86]))
+        #expect(!SpeechEvidence.isSilent([0.34, 1.00]))
     }
 
     @Test func noWindowsIsNotEvidenceOfSilence() {

@@ -3,14 +3,18 @@
 /// real words ("Yeah.", "Okay."), which `FillerOnly` must keep because people do say them;
 /// only the audio can tell the two apart.
 public enum SpeechEvidence {
-    /// Measured 2026-09-27 on a laptop microphone in a normal room: silent holds peaked at
-    /// 0.10-0.56, soft one-word answers at 0.96-1.00. The threshold sits in that gap.
+    /// Measured 2026-09-27 on a laptop microphone in a normal room, first window left out:
+    /// silent holds peaked at 0.02-0.46, one-word answers at 0.86-1.00. The threshold sits
+    /// in that gap.
     public static let threshold: Float = 0.7
 
-    /// True when no window reaches `threshold`. No windows at all proves nothing, so it is
-    /// not silence.
+    /// True when no window reaches `threshold`. The first window is left out whenever later
+    /// ones exist: it holds Sotto's own start sound and the key click, which once scored 0.94
+    /// on a silent hold, while every measured answer peaked in a later window. No windows at
+    /// all proves nothing, so it is not silence.
     public static func isSilent(_ windowProbabilities: [Float]) -> Bool {
-        guard let peak = windowProbabilities.max() else {
+        let judged = windowProbabilities.count > 1 ? windowProbabilities.dropFirst() : windowProbabilities[...]
+        guard let peak = judged.max() else {
             return false
         }
         return peak < threshold
