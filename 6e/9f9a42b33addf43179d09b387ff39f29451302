@@ -1,0 +1,22 @@
+Sources/Sotto/Core/DictationController.swift
+  s_167e1562cc51b5::t_dfda75555a4651 235,247-249,262-267
+  s_167e1562cc51b5::t_aacdba205145b1 268-269
+Tests/SottoAppTests/DictationControllerTests.swift
+  s_167e1562cc51b5::t_a6f9f66c3225df 201-221
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "6e9f9a42b33addf43179d09b387ff39f29451302",
+  "prompts": {},
+  "sessions": {
+    "s_167e1562cc51b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d9572c79-e728-4fc6-a74b-433213ba5609",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
