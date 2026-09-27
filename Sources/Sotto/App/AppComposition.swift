@@ -39,7 +39,7 @@ final class AppComposition {
                 case .apple:
                     return AppleSpeechEngine(locale: .current, biasPhrases: DictionaryStore.shared.biasPhrases)
                 case .parakeet:
-                    return ParakeetSpeechEngine(biasPhrases: DictionaryStore.shared.biasPhrases)
+                    return ParakeetSpeechEngine(biasPhrases: DictionaryStore.shared.vocabularyPhrases)
                 }
             }
         )

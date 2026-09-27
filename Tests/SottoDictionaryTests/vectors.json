@@ -718,5 +718,34 @@
         "count": 1
       }
     ]
+  },
+  {
+    "name": "a longer context trigger beats a shorter recasing one",
+    "entries": [
+      {
+        "kind": "correction",
+        "hear": "codex",
+        "write": "Codex"
+      },
+      {
+        "kind": "correction",
+        "hear": "security codex",
+        "write": "security code"
+      }
+    ],
+    "input": "I need a security Codex and codex review",
+    "expected": "I need a security code and Codex review",
+    "applied": [
+      {
+        "from": "security Codex",
+        "to": "security code",
+        "count": 1
+      },
+      {
+        "from": "codex",
+        "to": "Codex",
+        "count": 1
+      }
+    ]
   }
 ]

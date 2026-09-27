@@ -257,6 +257,11 @@ final class DictionaryStore {
         DictionaryCorrector.biasPhrases(from: entries)
     }
 
+    /// Parakeet's bias list (§6.6a): `biasPhrases` without context corrections' targets.
+    var vocabularyPhrases: [String] {
+        DictionaryCorrector.vocabularyPhrases(from: entries)
+    }
+
     // MARK: File access
 
     private func read() -> [DictionaryEntry]? {
