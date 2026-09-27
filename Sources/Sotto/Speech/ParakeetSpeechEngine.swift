@@ -2,6 +2,7 @@ import AVFoundation
 import FluidAudio
 import Foundation
 import SottoDictionary
+import SottoText
 
 /// NVIDIA Parakeet TDT (CoreML, via FluidAudio) behind the engine seam. Experimental, for
 /// side-by-side accuracy testing against `AppleSpeechEngine`. One instance serves one
@@ -71,8 +72,20 @@ actor ParakeetSpeechEngine: TranscriptionEngine {
     private var latest = ""
     private let biasPhrases: [String]
 
-    init(biasPhrases: [String] = []) {
+    /// Short holds are where Parakeet invents words on silence ("Mm-.", "Yeah."). Their audio
+    /// is kept, up to this many samples (3 s at 16 kHz), for the speech check at finish.
+    private static let speechProbeLimit = 48_000
+    private var probeSamples: [Float] = []
+    private var probeOverflowed = false
+    private var vad: VadManager?
+
+    /// Whether this hold's start sound plays: its first speech-detector window then holds that
+    /// sound and is left out of the speech check (§6.7).
+    private let startSoundPlays: Bool
+
+    init(biasPhrases: [String] = [], startSoundPlays: Bool = true) {
         self.biasPhrases = biasPhrases
+        self.startSoundPlays = startSoundPlays
     }
 
     // MARK: TranscriptionEngine
@@ -109,7 +122,45 @@ actor ParakeetSpeechEngine: TranscriptionEngine {
             Log.speech.debug("parakeet feed ignored in phase \(String(describing: self.phase), privacy: .public)")
             return
         }
+        keepForSpeechProbe(chunk.buffer)
         await manager.streamAudio(chunk.buffer)
+    }
+
+    private func keepForSpeechProbe(_ buffer: AVAudioPCMBuffer) {
+        guard !probeOverflowed, vad != nil, let channel = buffer.floatChannelData?[0] else {
+            return
+        }
+        let count = Int(buffer.frameLength)
+        guard probeSamples.count + count <= Self.speechProbeLimit else {
+            probeOverflowed = true
+            probeSamples = []
+            return
+        }
+        probeSamples.append(contentsOf: UnsafeBufferPointer(start: channel, count: count))
+    }
+
+    /// A short hold's final text is kept only if the speech detector heard speech in it
+    /// (§6.7): Parakeet turns silence into real words such as "Yeah.". Holds too long to keep
+    /// in memory, a missing detector, or a detector error all keep the text, as before.
+    /// Logs numbers only, never the text.
+    private func checkedForSpeech(_ text: String) async -> String {
+        guard !text.isEmpty, let vad, !probeOverflowed, !probeSamples.isEmpty else {
+            return text
+        }
+        let samples = probeSamples
+        probeSamples = []
+        do {
+            let probabilities = try await vad.process(samples).map(\.probability)
+            let silent = SpeechEvidence.isSilent(probabilities, ignoringFirstWindow: startSoundPlays)
+            let listed = probabilities.map { String(format: "%.2f", $0) }.joined(separator: " ")
+            Log.speech.info(
+                "speech check: \(Double(samples.count) / 16_000, format: .fixed(precision: 2), privacy: .public) s, windows [\(listed, privacy: .public)], \(silent ? "no speech; dropping" : "speech; keeping", privacy: .public) \(text.count, privacy: .public) chars"
+            )
+            return silent ? "" : text
+        } catch {
+            Log.speech.error("speech check failed, keeping the text: \(error.localizedDescription, privacy: .public)")
+            return text
+        }
     }
 
     func finish() async {
@@ -149,7 +200,11 @@ actor ParakeetSpeechEngine: TranscriptionEngine {
             Log.speech.info("parakeet finish pre-empted by cancel")
             return
         }
-        let trimmed = Self.trimmed(text)
+        let trimmed = await checkedForSpeech(Self.trimmed(text))
+        guard phase == .finishing else {
+            Log.speech.info("parakeet finish pre-empted by cancel during the speech check")
+            return
+        }
         outputContinuation?.yield(TranscriptSnapshot(text: trimmed, isFinal: true))
         outputContinuation?.finish()
         phase = .finished
@@ -183,6 +238,9 @@ actor ParakeetSpeechEngine: TranscriptionEngine {
     private func performStart() async throws -> AsyncThrowingStream<TranscriptSnapshot, Error> {
         let loaded = try await ParakeetModels.shared.readyModels()
         let models = loaded.asr
+        vad = loaded.vad
+        probeSamples = []
+        probeOverflowed = false
         try checkLive()
 
         // The streaming preset is tuned for live feedback; the blank id must match the
