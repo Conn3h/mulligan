@@ -1,0 +1,24 @@
+Tests/SottoTextTests/SpeechEvidenceTests.swift
+  s_54db94c607acba::t_84f04ca1931eda 23,31-47
+  s_54db94c607acba::t_18ac55efae3e8b 48
+Sources/SottoText/SpeechEvidence.swift
+  s_54db94c607acba::t_6370c0ac73d7e6 6-8,11-14,16-17
+docs/SPEC.md
+  s_54db94c607acba::t_766b291fa6fd8e 630-633
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "e6270a1c02cbc3ffeede3c61daa39b3a22650e0a",
+  "prompts": {},
+  "sessions": {
+    "s_54db94c607acba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9cec764-c6e0-4aee-98d4-309aa9357e9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
