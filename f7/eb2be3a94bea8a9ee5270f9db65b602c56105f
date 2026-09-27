@@ -1,0 +1,35 @@
+Tests/MulliganAppTests/SettingsTests.swift
+  s_54db94c607acba::t_8a88fcb7bc4649 79-92
+Sources/Mulligan/Support/Settings.swift
+  s_54db94c607acba::t_47bacdbc97c14d 18-19,22-24,57-66,86-89
+Sources/Mulligan/History/HistoryDays.swift
+  s_54db94c607acba::t_b2b4087df9e68c 1-80
+Tests/MulliganAppTests/HistoryDaysTests.swift
+  s_54db94c607acba::t_75758fcdf0ba0c 1-65
+Tests/MulliganAppTests/CorrectionUsageTests.swift
+  s_54db94c607acba::t_c358d263187ccc 1-50
+Tests/MulliganAppTests/FirstUseHintsTests.swift
+  s_54db94c607acba::t_3a27e35d8a10c5 1-29,32-39
+  s_54db94c607acba::t_bccf47abc68f52 30
+  s_54db94c607acba::t_8a88fcb7bc4649 31
+Sources/Mulligan/History/CorrectionUsage.swift
+  s_54db94c607acba::t_56d12d3736cdbe 1-35
+Sources/Mulligan/UI/FirstUseHints.swift
+  s_54db94c607acba::t_297a487ce58ac8 1-32
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "f7eb2be3a94bea8a9ee5270f9db65b602c56105f",
+  "prompts": {},
+  "sessions": {
+    "s_54db94c607acba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9cec764-c6e0-4aee-98d4-309aa9357e9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
