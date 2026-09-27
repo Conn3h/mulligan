@@ -14,6 +14,16 @@ struct Utterance: Sendable {
     let heldSeconds: TimeInterval
     /// Wall clock, for history display only.
     let releasedAt: Date
+    /// The frontmost app when the key was released: the text is typed only if it is still
+    /// frontmost when the text is ready. Nil when unknown.
+    let targetProcessID: pid_t?
+
+    init(source: UtteranceSource, heldSeconds: TimeInterval, releasedAt: Date, targetProcessID: pid_t? = nil) {
+        self.source = source
+        self.heldSeconds = heldSeconds
+        self.releasedAt = releasedAt
+        self.targetProcessID = targetProcessID
+    }
 }
 
 /// The one-utterance-at-a-time state machine between the hotkey, capture and the engine.
@@ -80,6 +90,7 @@ final class DictationController {
         let pressedAt: ContinuousClock.Instant
         var releasedAt: ContinuousClock.Instant?
         var releasedDate: Date?
+        var targetProcessID: pid_t?
         var engine: (any TranscriptionEngine)?
         var audioContinuation: AsyncStream<AudioChunk>.Continuation?
         var setupTask: Task<Void, Never>?
@@ -130,7 +141,8 @@ final class DictationController {
     private(set) var liveTaskCount = 0
 
     /// Receives the final raw transcript once per utterance. Awaited before returning to idle.
-    @ObservationIgnored var onFinalTranscript: (@MainActor (String, Utterance) async -> Void)?
+    /// A returned message (the text was recorded but not typed) is shown as the ending error.
+    @ObservationIgnored var onFinalTranscript: (@MainActor (String, Utterance) async -> String?)?
 
     @ObservationIgnored private let hotkey: any HotkeySource
     @ObservationIgnored private let capture: any AudioCapturing
@@ -496,6 +508,7 @@ final class DictationController {
         let releasedInstant = clock.now
         session.releasedAt = releasedInstant
         session.releasedDate = Date()
+        session.targetProcessID = NSWorkspace.shared.frontmostApplication?.processIdentifier
 
         // A release held for less than `minimumHold` is a mis-tap, not dictation: cancel the
         // engine instead of finalizing it, so the utterance never enters `.finishing` and
@@ -580,12 +593,15 @@ final class DictationController {
                 let utterance = Utterance(
                     source: session.source,
                     heldSeconds: session.heldSeconds(now: clock.now),
-                    releasedAt: session.releasedDate ?? Date()
+                    releasedAt: session.releasedDate ?? Date(),
+                    targetProcessID: session.targetProcessID
                 )
                 Log.app.info(
                     "utterance \(session.id, privacy: .public) final transcript ready: \(raw.count, privacy: .public) chars, held \(utterance.heldSeconds, privacy: .public)s"
                 )
-                await deliverBounded(raw, utterance, id: session.id)
+                if let notice = await deliverBounded(raw, utterance, id: session.id), endingError == nil {
+                    endingError = notice
+                }
             }
         }
 
@@ -638,13 +654,15 @@ final class DictationController {
     /// does not finish within `deliveryTimeout`, stop waiting and let the terminal task return
     /// to idle. The in-flight delivery is left running rather than cancelled: a mid-paste
     /// cancel could corrupt the injection or leave the pasteboard unrestored.
-    private func deliverBounded(_ raw: String, _ utterance: Utterance, id: Int) async {
+    /// Returns the delivery's message for the user, if it finished in time and had one.
+    private func deliverBounded(_ raw: String, _ utterance: Utterance, id: Int) async -> String? {
         guard onFinalTranscript != nil else {
-            return
+            return nil
         }
         let latch = RaceLatch()
+        let notice = NoticeBox()
         Task { @MainActor in
-            await self.onFinalTranscript?(raw, utterance)
+            notice.value = await self.onFinalTranscript?(raw, utterance) ?? nil
             latch.resolve(true)
         }
         let timer = Task { @MainActor in
@@ -658,19 +676,20 @@ final class DictationController {
         }
         if await latch.value() {
             timer.cancel()
-        } else {
-            Log.app.error(
-                "utterance \(id, privacy: .public) transcript delivery did not finish within \(self.deliveryTimeout, privacy: .public); leaving .finishing to avoid a wedge"
-            )
+            return notice.value
         }
+        Log.app.error(
+            "utterance \(id, privacy: .public) transcript delivery did not finish within \(self.deliveryTimeout, privacy: .public); leaving .finishing to avoid a wedge"
+        )
+        return nil
     }
 
     /// Awaits `engine.finish()` but never lets it hang the utterance. If finish does not
     /// return within `engineFinishTimeout`, cancel the engine (its abort path ends the
     /// analyzer and unblocks the stalled finalize) and stop waiting, so the terminal task
     /// proceeds and the controller leaves `.finishing`. The finish task then completes on
-    /// its own once cancel unblocks it.
-    /// Returns true when finish timed out and the engine was cancelled.
+    /// its own once cancel unblocks it. Returns true when finish timed out and the engine
+    /// was cancelled.
     private func finishBounded(_ engine: any TranscriptionEngine, timeout: Duration, utterance: Int) async -> Bool {
         let latch = RaceLatch()
         let finish = Task { @MainActor in
@@ -703,6 +722,12 @@ final class DictationController {
     static func finishTimeout(base: Duration, heldSeconds: TimeInterval) -> Duration {
         let grown = base + .milliseconds(Int(heldSeconds * finishTimeoutPerHeldSecond * 1_000))
         return min(max(grown, base), max(base, finishTimeoutCap))
+    }
+
+    /// Carries the delivery's message out of its unstructured task.
+    @MainActor
+    private final class NoticeBox {
+        var value: String?
     }
 
     /// A one-shot latch: the first `resolve` wins and wakes the single waiter; later resolves

@@ -53,17 +53,20 @@ enum TextInjector {
     /// Returns once the text has been handed to the focused app. On the paste path the
     /// pasteboard is restored `pasteCompletionDelay` later, so the caller (and the user)
     /// does not wait on it; see the type comment for how that restore is kept in line.
-    static func insert(_ text: String) async {
+    /// Returns false when neither path delivered the text.
+    @discardableResult
+    static func insert(_ text: String) async -> Bool {
         guard !text.isEmpty else {
             Log.inject.info("nothing to insert")
-            return
+            return true
         }
-        if let reason = await insertViaAccessibility(text) {
-            Log.inject.info(
-                "accessibility path not trusted (\(reason, privacy: .public)); pasting \(text.count, privacy: .public) chars"
-            )
-            await insertViaPasteboard(text)
+        guard let reason = await insertViaAccessibility(text) else {
+            return true
         }
+        Log.inject.info(
+            "accessibility path not trusted (\(reason, privacy: .public)); pasting \(text.count, privacy: .public) chars"
+        )
+        return await insertViaPasteboard(text)
     }
 
     /// Performs a pending pasteboard restore now instead of `pasteCompletionDelay` after
@@ -116,7 +119,8 @@ enum TextInjector {
             return "write failed (AXError \(writeError.rawValue))"
         }
         let started = injectionClock.now
-        guard let evidence = await awaitWriteEvidence(on: focused, before: before, countBefore: countBefore) else {
+        let expected = ExpectedWrite(before: before, insertedUnits: (inserted as NSString).length, countBefore: countBefore)
+        guard let evidence = await awaitWriteEvidence(on: focused, expecting: expected) else {
             return "write reported success but neither the selection nor the length changed within \(accessibilityVerifyTimeout)"
         }
         Log.inject.info(
@@ -130,20 +134,58 @@ enum TextInjector {
         return nil
     }
 
-    /// Polls for proof that an accessibility write landed: the selection moved, or the
-    /// field's character count changed. Returns a description of the evidence, or nil when
-    /// neither appeared before `accessibilityVerifyTimeout`.
-    private static func awaitWriteEvidence(
-        on element: AXUIElement, before: CFRange, countBefore: Int?
-    ) async -> String? {
+    /// What a landed write looks like: the caret (or a selection of the new text) ends
+    /// where the inserted text ends, and the length grows by the inserted text less what it
+    /// replaced. Both within `tolerance`, since autocorrect and newline
+    /// normalisation shift them slightly. A change of any other size is someone else's
+    /// (streamed terminal output, a collaborator's edit) and does not count.
+    private struct ExpectedWrite {
+        let before: CFRange
+        let insertedUnits: Int
+        let countBefore: Int?
+
+        func matchesSelection(_ after: CFRange) -> Bool {
+            guard after.location != before.location || after.length != before.length else {
+                return false
+            }
+            let expectedEnd = before.location + insertedUnits
+            return abs(after.location + after.length - expectedEnd) <= tolerance
+        }
+
+        func matchesCount(_ countAfter: Int) -> Bool {
+            guard let countBefore, countAfter != countBefore else {
+                return false
+            }
+            let expectedDelta = insertedUnits - before.length
+            return abs(countAfter - countBefore - expectedDelta) <= tolerance
+        }
+
+        /// Minimum slack, in UTF-16 units, growing to a tenth of a long insertion.
+        private static let minimumTolerance = 2
+        private var tolerance: Int { max(Self.minimumTolerance, insertedUnits / 10) }
+    }
+
+    /// Polls for proof that an accessibility write landed (see `ExpectedWrite`). Returns a
+    /// description of the evidence, or nil when none appeared before
+    /// `accessibilityVerifyTimeout`.
+    private static func awaitWriteEvidence(on element: AXUIElement, expecting expected: ExpectedWrite) async -> String? {
+        let before = expected.before
         let deadline = injectionClock.now + accessibilityVerifyTimeout
+        var loggedMismatch = false
         while true {
-            if let after = selectedRange(of: element),
-               after.location != before.location || after.length != before.length {
+            let after = selectedRange(of: element)
+            if let after, expected.matchesSelection(after) {
                 return "selection \(before.location)+\(before.length) -> \(after.location)+\(after.length)"
             }
-            if let countBefore, let countAfter = characterCount(of: element), countAfter != countBefore {
-                return "length \(countBefore) -> \(countAfter)"
+            let countAfter = characterCount(of: element)
+            if let countAfter, expected.matchesCount(countAfter) {
+                return "length \(expected.countBefore ?? -1) -> \(countAfter)"
+            }
+            if !loggedMismatch, let after, after.location != before.location || after.length != before.length {
+                loggedMismatch = true
+                Log.inject.info(
+                    "selection moved by an unexpected amount (\(before.location, privacy: .public)+\(before.length, privacy: .public) -> \(after.location, privacy: .public)+\(after.length, privacy: .public), inserted \(expected.insertedUnits, privacy: .public) units); still waiting"
+                )
             }
             guard injectionClock.now < deadline else {
                 return nil
@@ -258,7 +300,7 @@ enum TextInjector {
 
     // MARK: Pasteboard
 
-    private static func insertViaPasteboard(_ text: String) async {
+    private static func insertViaPasteboard(_ text: String) async -> Bool {
         await awaitPendingRestore()
         let outgoing = Self.pasteRunOnLeadingSpaceNeeded() ? " " + text : text
         let pasteboard = NSPasteboard.general
@@ -267,7 +309,7 @@ enum TextInjector {
         guard pasteboard.setString(outgoing, forType: .string) else {
             Log.inject.error("pasteboard write failed; nothing inserted")
             restore(saved, to: pasteboard)
-            return
+            return false
         }
         let ourChangeCount = pasteboard.changeCount
         // Registered before the first suspension: a quit during the settle wait must still
@@ -277,12 +319,12 @@ enum TextInjector {
         await wait(pasteboardSettleDelay)
         guard pendingRestore?.changeCount == ourChangeCount else {
             Log.inject.info("pasteboard was restored during the settle wait; not pasting")
-            return
+            return false
         }
         guard postCommandV() else {
             Log.inject.error("could not synthesize Command-V; nothing inserted")
             performPendingRestore(reason: "Command-V failed")
-            return
+            return false
         }
         Log.inject.info("pasted \(outgoing.count, privacy: .public) chars via Command-V")
         lastInjection = LastInjection(
@@ -291,6 +333,7 @@ enum TextInjector {
             endedInWhitespace: outgoing.last?.isWhitespace ?? false
         )
         scheduleRestoreTask()
+        return true
     }
 
     /// True when this paste immediately follows our own injection into the same frontmost

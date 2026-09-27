@@ -497,6 +497,7 @@ struct DictationControllerTests {
         harness.controller.onFinalTranscript = { _, _ in
             deliveryStarted = true
             await deliverGate.pass()
+            return nil
         }
         try await harness.pressAndListen()
 
@@ -618,6 +619,18 @@ struct DictationControllerTests {
         #expect(await engine.cancelCalls == 1)
         try await settle("idle after the error") { harness.state == .idle }
         #expect(harness.controller.liveTaskCount == 0)
+    }
+
+    @Test func deliveryNoticeIsShownAsAnError() async throws {
+        let engine = FakeEngine(.init(finalText: "meant for another app"))
+        let harness = Harness(engines: [engine], errorDisplayDuration: .milliseconds(100))
+        harness.deliveryNotice = "Not typed: the text is in History."
+        harness.controller.activate()
+        try await harness.pressAndListen()
+        harness.hotkey.release()
+        try await settle("notice shown") { harness.state == .error("Not typed: the text is in History.") }
+        #expect(harness.received.count == 1)
+        try await settle("idle after the notice") { harness.state == .idle }
     }
 
     // MARK: Sources

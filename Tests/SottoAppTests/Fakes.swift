@@ -346,6 +346,8 @@ final class Harness {
     let microphoneGate: Gate
     let controller: DictationController
     private(set) var received: [(text: String, utterance: Utterance)] = []
+    /// What the fake delivery reports back, as the pipeline does when text could not be typed.
+    var deliveryNotice: String?
 
     init(
         engines: [FakeEngine] = [],
@@ -382,6 +384,7 @@ final class Harness {
         )
         controller.onFinalTranscript = { [weak self] text, utterance in
             self?.received.append((text: text, utterance: utterance))
+            return self?.deliveryNotice
         }
     }
 
