@@ -218,7 +218,7 @@ final class DictationEraser: TypingObserver {
     /// the focused element is ours, its selection is exactly our range, and the text in it is
     /// still exactly what Sotto typed.
     private func isStillOurSelection(_ range: CFRange, element: AXElementID, record: TypedDictation, epoch: UInt64) -> Bool {
-        guard !eraseModifierIsDown(), inputEpoch == epoch, target.frontmostProcessID() == record.processID else {
+        guard inputEpoch == epoch, target.frontmostProcessID() == record.processID else {
             return false
         }
         guard case let .readable(focused, _, selection, preceding) = target.readBack(utf16Length: range.length),
@@ -228,7 +228,9 @@ final class DictationEraser: TypingObserver {
         else {
             return false
         }
-        return true
+        // Last, after the AX reads (each can take a moment): the erase key pressed again
+        // meanwhile would turn the backspace into Command-Delete.
+        return !eraseModifierIsDown()
     }
 
     /// The caret sits at the range's start and, when the field reports a length, it shrank by

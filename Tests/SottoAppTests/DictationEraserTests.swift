@@ -30,8 +30,14 @@ final class FakeEraseTarget: EraseTarget {
 
     func frontmostProcessID() -> pid_t? { frontmost }
 
+    /// Called on each `readBack`, with how many reads have happened.
+    var onReadBack: ((Int) -> Void)?
+    private var reads = 0
+
     /// The configured read, with the live selection when the field is readable.
     func readBack(utf16Length: Int) -> ReadBack {
+        reads += 1
+        onReadBack?(reads)
         if case let .readable(element, window, _, preceding) = read, let currentSelection {
             return .readable(element: element, window: window, selection: currentSelection, preceding: preceding)
         }
@@ -483,5 +489,21 @@ struct DictationEraserTests {
         let second = eraser.supersede()
         #expect(second == first + 1)
         #expect(eraser.deliveryGeneration == second)
+    }
+
+    @Test func theModifierIsCheckedAfterTheLastReadBeforeTheFallbackBackspace() async {
+        let (eraser, target, _, _) = makeEraser()
+        target.deleteApplies = false
+        readsBack(target)
+        // Reads: the plan, the re-plan after the modifier wait, then the check right before
+        // the fallback backspace. The key goes down again during that last read.
+        target.onReadBack = { reads in
+            if reads == 3 {
+                target.eraseKeyDownUntil = ContinuousClock().now + .seconds(30)
+            }
+        }
+        _ = typed(readable: true, eraser: eraser)
+        #expect(await eraser.eraseLast(token: EraseToken()) == .failed)
+        #expect(target.posted.isEmpty)
     }
 }
