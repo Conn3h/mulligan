@@ -175,7 +175,7 @@ struct DictationControllerTests {
         #expect(harness.controller.liveTaskCount == 0)
     }
 
-    @Test func pressWhileFinishingIsIgnored() async throws {
+    @Test func pressWhileFinishingStartsOnceItEnds() async throws {
         let finishGate = Gate(open: false)
         let engine = FakeEngine(.init(finishGate: finishGate))
         let harness = Harness(engines: [engine])
@@ -192,8 +192,28 @@ struct DictationControllerTests {
         #expect(harness.capture.startCalls == 1)
 
         await finishGate.open()
-        try await settle("idle") { harness.state == .idle }
+        try await settle("queued press listening") { harness.state == .listening }
         #expect(harness.received.count == 1)
+        #expect(harness.factory.made.count == 2)
+        try await harness.releaseAndIdle()
+    }
+
+    @Test func pressAndReleaseWhileFinishingIsDropped() async throws {
+        let finishGate = Gate(open: false)
+        let engine = FakeEngine(.init(finishGate: finishGate))
+        let harness = Harness(engines: [engine])
+        harness.controller.activate()
+        try await harness.pressAndListen()
+
+        harness.hotkey.release()
+        await finishGate.waitForArrival()
+        harness.hotkey.press()
+        harness.hotkey.release()
+
+        await finishGate.open()
+        try await settle("idle") { harness.state == .idle }
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(harness.state == .idle)
         #expect(harness.factory.made.count == 1)
     }
 
@@ -590,16 +610,17 @@ struct DictationControllerTests {
         #expect(harness.received.map(\.text) == ["Yes."])
     }
 
-    @Test func captureInterruptionEndsTheUtteranceWithItsMessage() async throws {
-        let engine = FakeEngine(.init(finalText: "never delivered"))
+    @Test func captureInterruptionDeliversTheTextThenShowsItsMessage() async throws {
+        let engine = FakeEngine(.init(finalText: "said before the change"))
         let harness = Harness(engines: [engine], errorDisplayDuration: .milliseconds(100))
         harness.controller.activate()
         try await harness.pressAndListen()
 
         #expect(harness.capture.emitInterruption("The microphone changed."))
         try await settle("error") { harness.state == .error("The microphone changed.") }
-        #expect(harness.received.isEmpty)
-        #expect(await engine.cancelCalls == 1)
+        // Everything said before the interruption is still delivered.
+        #expect(harness.received.map(\.text) == ["said before the change"])
+        #expect(await engine.finishCalls == 1)
         try await settle("idle after the error") { harness.state == .idle }
         #expect(harness.controller.liveTaskCount == 0)
     }

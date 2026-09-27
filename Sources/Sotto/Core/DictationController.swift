@@ -92,6 +92,8 @@ final class DictationController {
         var releasedAt: ContinuousClock.Instant?
         var releasedDate: Date?
         var targetProcessID: pid_t?
+        /// Why capture stopped under this utterance, shown once its text is delivered.
+        var interruptionNotice: String?
         var engine: (any TranscriptionEngine)?
         var audioContinuation: AsyncStream<AudioChunk>.Continuation?
         var setupTask: Task<Void, Never>?
@@ -181,6 +183,9 @@ final class DictationController {
     @ObservationIgnored private let clock = ContinuousClock()
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var session: Session?
+    /// A press that arrived while the previous utterance was still ending. It starts once
+    /// that utterance returns to idle, unless its own release arrives first.
+    @ObservationIgnored private var pendingPress: UtteranceSource?
     @ObservationIgnored private var errorResetTask: Task<Void, Never>?
 
     init(
@@ -262,9 +267,18 @@ final class DictationController {
 
     private func press(source: UtteranceSource) {
         if let session {
-            Log.app.debug(
-                "press ignored: utterance \(session.id, privacy: .public) still \(String(describing: self.state), privacy: .public)"
-            )
+            if session.isTerminating {
+                // Pressing again right after a release (or after a lost release was
+                // recovered) used to be dropped, so the user talked to nothing.
+                pendingPress = source
+                Log.app.info(
+                    "press queued: utterance \(session.id, privacy: .public) is still ending"
+                )
+            } else {
+                Log.app.debug(
+                    "press ignored: utterance \(session.id, privacy: .public) still \(String(describing: self.state), privacy: .public)"
+                )
+            }
             return
         }
         switch state {
@@ -293,6 +307,11 @@ final class DictationController {
     /// end a Record-button utterance (the user may be using the key for Command-Tab or a
     /// special character). The Stop button passes nil and ends any utterance.
     private func release(onlyFrom source: UtteranceSource? = nil) {
+        if let pending = pendingPress, source == nil || source == pending {
+            pendingPress = nil
+            Log.app.info("queued press released before it could start; dropped")
+            return
+        }
         guard let session else {
             Log.app.debug("release ignored: no utterance")
             return
@@ -461,14 +480,17 @@ final class DictationController {
     }
 
     /// Capture stopped under a live utterance (the input device changed and could not be
-    /// restarted). End it with the message rather than keep "listening" to nothing.
+    /// restarted). End it rather than keep "listening" to nothing: as a release, so the text
+    /// so far is delivered, then show the message.
     private func captureInterrupted(_ message: String, generation: Int) {
         guard let session, session.id == generation, !session.isTerminating else {
             Log.audio.debug("capture interruption for a finished utterance ignored")
             return
         }
         Log.audio.error("utterance \(session.id, privacy: .public) capture interrupted: \(message, privacy: .public)")
-        terminate(session, reason: .failed(message))
+        // End as a release so everything said before the interruption is still delivered.
+        session.interruptionNotice = message
+        terminate(session, reason: .released)
     }
 
     private func applyLevel(_ value: Float, generation: Int) {
@@ -599,6 +621,10 @@ final class DictationController {
             }
         }
 
+        if endingError == nil, let notice = session.interruptionNotice {
+            endingError = notice
+        }
+
         // 6. Back to idle (or error).
         guard session === self.session else {
             Log.app.error("utterance \(session.id, privacy: .public) was replaced before its terminal task finished")
@@ -623,6 +649,11 @@ final class DictationController {
         Log.app.info(
             "utterance \(session.id, privacy: .public) ended (\(reason.label, privacy: .public)); liveTaskCount after this task: \(self.liveTaskCount - 1, privacy: .public)"
         )
+        if let pending = pendingPress {
+            pendingPress = nil
+            Log.app.info("starting the queued press")
+            press(source: pending)
+        }
     }
 
     private func scheduleErrorReset(_ message: String, generation: Int) {
