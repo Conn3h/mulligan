@@ -1,0 +1,19 @@
+docs/SPEC.md
+  s_167e1562cc51b5::t_aa402cf1d710fa 461,501-505,550-552,564-566,569-583,609-610,632-633,637,693-701
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "fd537afa6d7d167ec37cdffbf0c71afef57f16f2",
+  "prompts": {},
+  "sessions": {
+    "s_167e1562cc51b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d9572c79-e728-4fc6-a74b-433213ba5609",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
