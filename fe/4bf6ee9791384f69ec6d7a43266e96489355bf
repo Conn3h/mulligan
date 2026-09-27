@@ -1,0 +1,29 @@
+docs/SPEC.md
+  s_54db94c607acba::t_cb95fa22077bdf 1187-1188
+  s_54db94c607acba::t_618dec722395a5 1431
+Sources/Sotto/App/SottoApp.swift
+  s_54db94c607acba::t_415bd0e9288d8e 81-83,86,103-109,132
+Sources/Sotto/UI/MenuBarContent.swift
+  s_54db94c607acba::t_cb95fa22077bdf 19-23
+Sources/Sotto/UI/SettingsWindow.swift
+  s_54db94c607acba::t_cb95fa22077bdf 4-5,19,60-87
+  s_54db94c607acba::t_05b2e1b369d95c 88
+Sources/Sotto/App/AppComposition.swift
+  s_54db94c607acba::t_cb95fa22077bdf 44-46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "fe4bf6ee9791384f69ec6d7a43266e96489355bf",
+  "prompts": {},
+  "sessions": {
+    "s_54db94c607acba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9cec764-c6e0-4aee-98d4-309aa9357e9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
