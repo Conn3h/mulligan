@@ -45,6 +45,13 @@ struct ExpectedWriteTests {
         #expect(!expected.matchesCount(900))
     }
 
+    @Test func smallUnrelatedChangesDoNotCount() {
+        // 20 units were written; a one-unit change either way is someone else's edit.
+        #expect(!expected.matchesCount(99))
+        #expect(!expected.matchesCount(101))
+        #expect(!expected.matchesSelection(CFRange(location: 11, length: 0)))
+    }
+
     @Test func unchangedOrShrinkingLengthDoesNotCount() {
         #expect(!expected.matchesCount(100))
         #expect(!expected.matchesCount(95))

@@ -53,20 +53,28 @@ enum TextInjector {
     /// Returns once the text has been handed to the focused app. On the paste path the
     /// pasteboard is restored `pasteCompletionDelay` later, so the caller (and the user)
     /// does not wait on it; see the type comment for how that restore is kept in line.
-    /// Returns false when neither path delivered the text.
+    /// `targetProcessID` is the app the text is meant for: the paste is abandoned if another
+    /// app comes to the front while the accessibility write is being verified.
     @discardableResult
-    static func insert(_ text: String) async -> Bool {
+    static func insert(_ text: String, targetProcessID: pid_t? = nil) async -> Outcome {
         guard !text.isEmpty else {
             Log.inject.info("nothing to insert")
-            return true
+            return .landed
         }
         guard let reason = await insertViaAccessibility(text) else {
-            return true
+            return .landed
         }
         Log.inject.info(
             "accessibility path not trusted (\(reason, privacy: .public)); pasting \(text.count, privacy: .public) chars"
         )
-        return await insertViaPasteboard(text)
+        return await insertViaPasteboard(text, targetProcessID: targetProcessID)
+    }
+
+    enum Outcome: Sendable, Equatable {
+        case landed
+        case failed
+        /// Another app came to the front before the paste; nothing was typed.
+        case focusMoved
     }
 
     /// Performs a pending pasteboard restore now instead of `pasteCompletionDelay` after
@@ -135,12 +143,12 @@ enum TextInjector {
     }
 
     /// What a landed write looks like: the caret (or a selection of the new text) now ends
-    /// past where the write started, and the length changed by roughly the inserted text less
-    /// what it replaced. "Roughly" is up to double or down to nothing: editors that convert
-    /// on insert (markdown, emoji shortcodes, autocorrect) change the landed length, and
-    /// treating their write as failed pastes the text a second time. A backwards move or a
-    /// jump far beyond that (a terminal printing a screenful) is someone else's change and
-    /// does not count.
+    /// between half and double the inserted length past where the write started, or the
+    /// length grew by between half and double the inserted text less what it replaced. The
+    /// band is wide because editors that convert on insert (markdown, emoji shortcodes,
+    /// autocorrect) change the landed length, and treating their write as failed pastes the
+    /// text a second time. Backwards moves, small changes and far jumps (a terminal printing
+    /// a screenful) are someone else's and do not count.
     struct ExpectedWrite {
         let before: CFRange
         let insertedUnits: Int
@@ -151,15 +159,23 @@ enum TextInjector {
                 return false
             }
             let end = after.location + after.length
-            return end > before.location && end <= before.location + 2 * insertedUnits + tolerance
+            let nearest = before.location + max(1, insertedUnits / 2)
+            return end >= nearest && end <= before.location + 2 * insertedUnits + tolerance
         }
 
+        /// A growing field must grow by at least half the expected amount and at most double
+        /// it; a field the write should shrink (it replaced a longer selection) must land
+        /// within the tolerance. A small change either way is someone else's edit.
         func matchesCount(_ countAfter: Int) -> Bool {
             guard let countBefore, countAfter != countBefore else {
                 return false
             }
+            let delta = countAfter - countBefore
             let expectedDelta = insertedUnits - before.length
-            return abs(countAfter - countBefore - expectedDelta) <= insertedUnits + tolerance
+            guard expectedDelta > 0 else {
+                return abs(delta - expectedDelta) <= tolerance
+            }
+            return delta >= max(1, (expectedDelta + 1) / 2) && delta <= 2 * expectedDelta + tolerance
         }
 
         /// Minimum slack, in UTF-16 units, growing to a tenth of a long insertion.
@@ -302,7 +318,7 @@ enum TextInjector {
 
     // MARK: Pasteboard
 
-    private static func insertViaPasteboard(_ text: String) async -> Bool {
+    private static func insertViaPasteboard(_ text: String, targetProcessID: pid_t?) async -> Outcome {
         await awaitPendingRestore()
         let outgoing = Self.pasteRunOnLeadingSpaceNeeded() ? " " + text : text
         let pasteboard = NSPasteboard.general
@@ -311,7 +327,7 @@ enum TextInjector {
         guard pasteboard.setString(outgoing, forType: .string) else {
             Log.inject.error("pasteboard write failed; nothing inserted")
             restore(saved, to: pasteboard)
-            return false
+            return .failed
         }
         let ourChangeCount = pasteboard.changeCount
         // Registered before the first suspension: a quit during the settle wait must still
@@ -321,12 +337,22 @@ enum TextInjector {
         await wait(pasteboardSettleDelay)
         guard pendingRestore?.changeCount == ourChangeCount else {
             Log.inject.info("pasteboard was restored during the settle wait; not pasting")
-            return false
+            return .failed
+        }
+        // The accessibility verification and the settle wait both suspend; Command-V goes
+        // to whatever app is in front now, which must still be the one the text is for.
+        if let targetProcessID, let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+           frontmost != targetProcessID {
+            Log.inject.info(
+                "frontmost app changed before Command-V (pid \(targetProcessID, privacy: .public) -> \(frontmost, privacy: .public)); not pasting"
+            )
+            performPendingRestore(reason: "focus moved")
+            return .focusMoved
         }
         guard postCommandV() else {
             Log.inject.error("could not synthesize Command-V; nothing inserted")
             performPendingRestore(reason: "Command-V failed")
-            return false
+            return .failed
         }
         Log.inject.info("pasted \(outgoing.count, privacy: .public) chars via Command-V")
         lastInjection = LastInjection(
@@ -335,7 +361,7 @@ enum TextInjector {
             endedInWhitespace: outgoing.last?.isWhitespace ?? false
         )
         scheduleRestoreTask()
-        return true
+        return .landed
     }
 
     /// True when this paste immediately follows our own injection into the same frontmost

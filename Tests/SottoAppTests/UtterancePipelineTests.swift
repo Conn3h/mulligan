@@ -26,7 +26,7 @@ private struct PipelineHarness {
         cleanupEnabled: Bool = false,
         soundEnabled: Bool = false,
         entries: [DictionaryEntry] = [],
-        injectSucceeds: Bool = true,
+        injectOutcome: TextInjector.Outcome = .landed,
         frontmostProcessID: pid_t? = nil
     ) {
         let recorder = PipelineRecorder()
@@ -41,9 +41,9 @@ private struct PipelineHarness {
             readSettings: { settings },
             makeCorrector: { DictionaryCorrector(entries: entries) },
             recordHistory: { run in recorder.recorded.append(run) },
-            inject: { text in
+            inject: { text, _ in
                 recorder.injected.append(text)
-                return injectSucceeds
+                return injectOutcome
             },
             playEndSound: { recorder.soundPlays += 1 },
             readFrontmostProcessID: { frontmostProcessID }
@@ -94,8 +94,18 @@ struct UtterancePipelineTests {
         #expect(harness.soundPlays == 1)
     }
 
+    @Test func focusMovingDuringInjectionReportsItAndSkipsTheSound() async {
+        let harness = PipelineHarness(soundEnabled: true, injectOutcome: .focusMoved)
+
+        let notice = await harness.pipeline.process(raw: "not here", utterance: makeUtterance(source: .hotkey))
+
+        #expect(harness.recorded.map(\.text) == ["not here"])
+        #expect(notice == UtterancePipeline.focusMovedMessage)
+        #expect(harness.soundPlays == 0)
+    }
+
     @Test func failedInjectionReportsAndSkipsTheLandedSound() async {
-        let harness = PipelineHarness(soundEnabled: true, injectSucceeds: false)
+        let harness = PipelineHarness(soundEnabled: true, injectOutcome: .failed)
 
         let notice = await harness.pipeline.process(raw: "lost text", utterance: makeUtterance(source: .hotkey))
 

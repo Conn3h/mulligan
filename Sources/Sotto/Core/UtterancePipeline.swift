@@ -19,8 +19,9 @@ final class UtterancePipeline {
     typealias SettingsReader = @MainActor () -> SettingsSnapshot
     typealias CorrectorProvider = @MainActor () -> DictionaryCorrector
     typealias HistoryRecorder = @MainActor (DictationRun) -> Void
-    /// True when the text reached the focused app.
-    typealias Injector = @MainActor (String) async -> Bool
+    /// Types the text into the focused app, abandoning it if the given app is no longer in
+    /// front by the time it would paste.
+    typealias Injector = @MainActor (String, pid_t?) async -> TextInjector.Outcome
     typealias SoundPlayer = @MainActor () -> Void
     typealias EngineNameReader = @MainActor () -> String
     typealias FrontmostProcessReader = @MainActor () -> pid_t?
@@ -45,7 +46,7 @@ final class UtterancePipeline {
         readSettings: @escaping SettingsReader = UtterancePipeline.readSharedSettings,
         makeCorrector: @escaping CorrectorProvider = { DictionaryStore.shared.corrector },
         recordHistory: @escaping HistoryRecorder = { run in HistoryLog.record(run) },
-        inject: @escaping Injector = { text in await TextInjector.insert(text) },
+        inject: @escaping Injector = { text, target in await TextInjector.insert(text, targetProcessID: target) },
         playEndSound: @escaping SoundPlayer = UtterancePipeline.playSystemEndSound,
         readFrontmostProcessID: @escaping FrontmostProcessReader = {
             NSWorkspace.shared.frontmostApplication?.processIdentifier
@@ -93,9 +94,17 @@ final class UtterancePipeline {
                     "pipeline: frontmost app changed since release (pid \(target, privacy: .public) -> \(frontmost, privacy: .public)); recorded \(text.count, privacy: .public) chars, not typed"
                 )
                 notice = Self.focusMovedMessage
-            } else if !(await inject(text)) {
-                Log.app.error("pipeline: injection failed; recorded \(text.count, privacy: .public) chars")
-                notice = Self.insertFailedMessage
+            } else {
+                switch await inject(text, utterance.targetProcessID) {
+                case .landed:
+                    break
+                case .focusMoved:
+                    Log.app.info("pipeline: frontmost app changed during injection; recorded \(text.count, privacy: .public) chars, not typed")
+                    notice = Self.focusMovedMessage
+                case .failed:
+                    Log.app.error("pipeline: injection failed; recorded \(text.count, privacy: .public) chars")
+                    notice = Self.insertFailedMessage
+                }
             }
         case .button:
             Log.app.info("pipeline: button utterance recorded, not typed (\(text.count, privacy: .public) chars)")
