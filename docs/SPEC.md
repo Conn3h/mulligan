@@ -1276,7 +1276,7 @@ struct TypedDictation: Sendable {
     let window: AXElementID?     // the app's focused window, when readable
     let caretEnd: Int?           // UTF-16 caret location after the insert, when readable
     let landedAt: ContinuousClock.Instant
-    let previousInjection: TextInjector.LastInjectionSnapshot?   // restored on erase (run-on spacing)
+    let previousInjection: LastInjectionSnapshot?   // TextInjector's run-on state before this insert, restored on erase
     var inputEpoch: UInt64       // the monitor's epoch when it landed
 }
 ```
@@ -1323,7 +1323,7 @@ current epoch, the frontmost pid, and a `ReadBack` taken just now):
 
 ```swift
 enum ReadBack: Equatable {
-    case unreadable                                   // no focused element or no text attributes
+    case unreadable(window: AXElementID?)             // no readable text; the window when AX can still name it
     case readable(element: AXElementID, window: AXElementID?, selection: CFRange, preceding: String?)
         // `preceding`: the record's UTF-16 length of text ending at selection.location + selection.length,
         // nil when that range is out of bounds
@@ -1340,7 +1340,8 @@ enum ErasePlan: Equatable {
 3. `.readable`: the element must equal the recorded element and the recorded caret must be
    known; the selection must be either a caret at `caretEnd` or exactly the inserted range
    (some apps leave the insertion selected); `preceding` must equal `record.text` exactly,
-   UTF-16 unit for unit (no normalisation: an app that normalised the text has changed it).
+   UTF-16 unit for unit (no normalisation: an app that normalised the text has changed it;
+   Swift's `==` on `String` compares canonically, so compare `utf16` views).
    All true → `.deleteRange(caretEnd - n, n)`, `n` = `record.text.utf16.count`; otherwise
    `.refuse(.textChanged)` (a different element or window counts as `.inputSince`). The
    epoch is not consulted: read-back is proof, the epoch is inference. The element check is
