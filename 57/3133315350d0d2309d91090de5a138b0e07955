@@ -1,0 +1,26 @@
+Tests/SottoAppTests/SettingsTests.swift
+  s_54db94c607acba::t_3c0e8481e14a16 42-77
+Tests/SottoAppTests/EraseKeyTests.swift
+  s_54db94c607acba::t_3c0e8481e14a16 1-28
+Sources/Sotto/Core/EraseKey.swift
+  s_54db94c607acba::t_0d0524685a3679 1-44
+Sources/Sotto/Support/Settings.swift
+  s_54db94c607acba::t_6b02cb2523a9f4 17,23-33,57-60,65
+  s_54db94c607acba::t_f68c88e48aa0b2 54,56,61-64
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "573133315350d0d2309d91090de5a138b0e07955",
+  "prompts": {},
+  "sessions": {
+    "s_54db94c607acba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9cec764-c6e0-4aee-98d4-309aa9357e9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
