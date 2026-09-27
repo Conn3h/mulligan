@@ -264,9 +264,14 @@ final class AudioCapture: AudioCapturing {
         live.engine.stop()
     }
 
-    /// Errors a device mid-switch produces: worth a retry on a fresh engine. Our own errors
-    /// other than `inputNotReady` (no microphone, no converter) will not change on a retry;
-    /// CoreAudio's (-10868, 560227702 "cannot perform IO") come from a device in transition.
+    /// CoreAudio errors seen from a device in transition during the hardware stress run:
+    /// -10868 from `engine.start()` right after a default-input switch, and 560227702
+    /// ("cannot perform IO") right after the active device vanished.
+    private static let transientCoreAudioCodes: Set<Int> = [-10868, 560_227_702]
+
+    /// Errors a device mid-switch produces: worth a retry on a fresh engine. Anything else
+    /// (no microphone, no converter, an unfamiliar CoreAudio failure) surfaces at once with
+    /// its real cause rather than being retried and reported as "still switching".
     private static func isTransient(_ error: Error) -> Bool {
         if let captureError = error as? AudioCaptureError {
             if case .inputNotReady = captureError {
@@ -274,7 +279,7 @@ final class AudioCapture: AudioCapturing {
             }
             return false
         }
-        return (error as NSError).domain != NSCocoaErrorDomain
+        return transientCoreAudioCodes.contains((error as NSError).code)
     }
 
     /// Moves capture to a fresh engine on the current input, so a device change mid-hold
@@ -380,6 +385,12 @@ final class AudioCapture: AudioCapturing {
             let silent = now - max(last, live.startedAt)
             let deadline = last == 0 ? Self.firstBufferDeadline : Self.bufferGapDeadline
             guard silent > deadline else {
+                // Buffers are flowing again: an earlier blip minutes ago must not count
+                // towards giving up on a long hold.
+                if last != 0, running.silenceRestarts > 0 {
+                    running.silenceRestarts = 0
+                    storage.running = running
+                }
                 return .healthy
             }
             running.silenceRestarts += 1

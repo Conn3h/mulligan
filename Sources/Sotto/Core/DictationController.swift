@@ -94,6 +94,10 @@ final class DictationController {
         var targetProcessID: pid_t?
         /// Why capture stopped under this utterance, shown once its text is delivered.
         var interruptionNotice: String?
+        /// An interruption that arrived while setup was still running (capture starts off the
+        /// main actor); applied once setup finishes, so it ends the utterance the same way
+        /// whichever side of that boundary it lands on.
+        var interruptionDuringSetup: String?
         var engine: (any TranscriptionEngine)?
         var audioContinuation: AsyncStream<AudioChunk>.Continuation?
         var setupTask: Task<Void, Never>?
@@ -414,8 +418,12 @@ final class DictationController {
         // The continuation is the generation carrier for buffers: once the terminal task
         // finishes it, late yields from this session's tap are dropped by the stream.
         let generation = session.id
+        // Off the main actor: a start on an input that is mid-switch retries with short
+        // sleeps, which would otherwise freeze the HUD and the hotkey for that long.
+        let capture = self.capture
         do {
-            try capture.start(
+            try await Task.detached(priority: .userInitiated) {
+                try capture.start(
                 outputFormat: format,
                 onBuffer: { chunk in
                     continuation.yield(chunk)
@@ -430,12 +438,20 @@ final class DictationController {
                         self?.captureInterrupted(message, generation: generation)
                     }
                 }
-            )
+                )
+            }.value
         } catch {
             Log.audio.error(
                 "capture start failed for utterance \(session.id, privacy: .public): \(error.localizedDescription, privacy: .public)"
             )
-            terminate(session, reason: .failed(error.localizedDescription))
+            if isLive(session) {
+                terminate(session, reason: .failed(error.localizedDescription))
+            }
+            return
+        }
+        // Released during the start: the terminal task awaits this setup and then stops
+        // capture, so there is nothing more to do here.
+        guard isLive(session) else {
             return
         }
 
@@ -448,6 +464,9 @@ final class DictationController {
             await self?.consume(snapshots, for: session)
         }
         startWatchdog(session)
+        if let message = session.interruptionDuringSetup {
+            captureInterrupted(message, generation: session.id)
+        }
     }
 
     /// Caps `.listening` at `maxHold`. If a release is never delivered nothing else would end
@@ -501,6 +520,11 @@ final class DictationController {
     private func captureInterrupted(_ message: String, generation: Int) {
         guard let session, session.id == generation, !session.isTerminating else {
             Log.audio.debug("capture interruption for a finished utterance ignored")
+            return
+        }
+        guard session.consumeTask != nil else {
+            session.interruptionDuringSetup = message
+            Log.audio.info("utterance \(session.id, privacy: .public) capture interrupted during setup; applying once setup finishes")
             return
         }
         Log.audio.error("utterance \(session.id, privacy: .public) capture interrupted: \(message, privacy: .public)")
