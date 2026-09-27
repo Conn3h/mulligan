@@ -1,0 +1,24 @@
+docs/SPEC.md
+  s_54db94c607acba::t_6b967345bf2f85 1411-1412
+  s_54db94c607acba::t_7c31e5a63a58cf 1418-1420
+Tests/SottoAppTests/DictationEraserTests.swift
+  s_54db94c607acba::t_8e389db6a92293 24-27,86-91,117-125,132-148,750-781
+Sources/Sotto/Core/DictationEraser.swift
+  s_54db94c607acba::t_6b967345bf2f85 62-64,233,235,322
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "1a394d02649acf8a86f52e79e6f79fab96631f1f",
+  "prompts": {},
+  "sessions": {
+    "s_54db94c607acba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9cec764-c6e0-4aee-98d4-309aa9357e9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
