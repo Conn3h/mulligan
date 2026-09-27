@@ -1,0 +1,27 @@
+Sources/SottoDictionary/DictionaryCorrector.swift
+  s_167e1562cc51b5::t_27b102b69195e6 32-34
+  s_167e1562cc51b5::t_d104909f3092bb 173-188
+  s_167e1562cc51b5::t_b37c0c65e01c27 216-217
+  s_167e1562cc51b5::t_10c9237de5ac59 59-62
+  s_167e1562cc51b5::t_1b8916820d9c6d 250-275
+docs/SPEC.md
+  s_167e1562cc51b5::t_0ebe595efe52bd 818-824
+Tests/SottoDictionaryTests/vectors.json
+  s_167e1562cc51b5::t_76d27e8e7aaadb 569-664
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "896ef9c023c14b7a87155dfe8c8697a2e0f65cd8",
+  "prompts": {},
+  "sessions": {
+    "s_167e1562cc51b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d9572c79-e728-4fc6-a74b-433213ba5609",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
