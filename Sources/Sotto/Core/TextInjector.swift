@@ -134,12 +134,14 @@ enum TextInjector {
         return nil
     }
 
-    /// What a landed write looks like: the caret (or a selection of the new text) ends
-    /// where the inserted text ends, and the length grows by the inserted text less what it
-    /// replaced. Both within `tolerance`, since autocorrect and newline
-    /// normalisation shift them slightly. A change of any other size is someone else's
-    /// (streamed terminal output, a collaborator's edit) and does not count.
-    private struct ExpectedWrite {
+    /// What a landed write looks like: the caret (or a selection of the new text) now ends
+    /// past where the write started, and the length changed by roughly the inserted text less
+    /// what it replaced. "Roughly" is up to double or down to nothing: editors that convert
+    /// on insert (markdown, emoji shortcodes, autocorrect) change the landed length, and
+    /// treating their write as failed pastes the text a second time. A backwards move or a
+    /// jump far beyond that (a terminal printing a screenful) is someone else's change and
+    /// does not count.
+    struct ExpectedWrite {
         let before: CFRange
         let insertedUnits: Int
         let countBefore: Int?
@@ -148,8 +150,8 @@ enum TextInjector {
             guard after.location != before.location || after.length != before.length else {
                 return false
             }
-            let expectedEnd = before.location + insertedUnits
-            return abs(after.location + after.length - expectedEnd) <= tolerance
+            let end = after.location + after.length
+            return end > before.location && end <= before.location + 2 * insertedUnits + tolerance
         }
 
         func matchesCount(_ countAfter: Int) -> Bool {
@@ -157,7 +159,7 @@ enum TextInjector {
                 return false
             }
             let expectedDelta = insertedUnits - before.length
-            return abs(countAfter - countBefore - expectedDelta) <= tolerance
+            return abs(countAfter - countBefore - expectedDelta) <= insertedUnits + tolerance
         }
 
         /// Minimum slack, in UTF-16 units, growing to a tenth of a long insertion.
