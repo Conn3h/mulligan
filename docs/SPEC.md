@@ -1184,7 +1184,8 @@ adding. File menu: "Reveal Dictionary File" and "Reload Dictionary".
 
 **Settings** — `UI/SettingsWindow.swift`, the standard `Settings` scene (⌘,). Sections:
 Push to talk (segmented choice of the three keys; changing it calls
-`controller.reloadHotkey()`), Erase (segmented choice over `EraseKey`, §6.16; changing it
+`controller.reloadHotkey()`), Erase (segmented choice over the `EraseKey` cases that do not conflict with the push-to-talk
+key, §6.16; changing it
 also calls `controller.reloadHotkey()`; caption "Hold ⟨key⟩ and press ⟨erase key⟩ to remove
 your last dictation and say it again.", or "Erasing is off." when off), Cleanup (toggle; when on, a Smart cleanup toggle disabled with
 the `unavailableReason` shown when the Foundation Model is unavailable), Sound (toggle), and
@@ -1427,7 +1428,7 @@ so there is never a gap in which nothing owns it.
 - HUD text for `.erasing`: "Erasing…".
 
 **Settings.** `Settings.eraseKey` (default `.rightCommand`). The erase key can never be the
-push-to-talk key: the Settings picker disables the conflicting option; setting
+push-to-talk key: the Settings picker leaves the conflicting option out; setting
 `pushToTalkKey` to a conflicting key moves `eraseKey` to the other right-hand modifier (Right ⌥
 push to talk ↔ Right ⌘ erase); fn keeps whatever it had. `init` repairs a conflicting stored
 pair explicitly (property observers do not run in an initialiser) and persists the repair.

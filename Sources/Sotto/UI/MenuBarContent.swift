@@ -16,6 +16,11 @@ struct MenuBarContent: View {
             Text("Hold \(Settings.shared.pushToTalkKey.displayName) to dictate")
                 .disabled(true)
 
+            if Settings.shared.eraseKey != .off {
+                Text("\(Settings.shared.pushToTalkKey.displayName) + \(Settings.shared.eraseKey.displayName) erases the last one")
+                    .disabled(true)
+            }
+
             Divider()
 
             Button("Open Sotto") {

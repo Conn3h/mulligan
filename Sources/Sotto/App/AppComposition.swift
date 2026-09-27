@@ -41,6 +41,9 @@ final class AppComposition {
                 case .parakeet:
                     return ParakeetSpeechEngine(biasPhrases: DictionaryStore.shared.vocabularyPhrases)
                 }
+            },
+            eraseLast: { token in
+                await DictationEraser.shared.eraseLast(token: token)
             }
         )
         controller.onFinalTranscript = { raw, utterance in

@@ -78,8 +78,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if Settings.shared.speechEngine == .parakeet {
             ParakeetModels.shared.prepare()
         }
+        // Before any dictation can land, so every insert is recorded for erase (§6.16).
+        TextInjector.configureAccessibilityTimeout()
+        TextInjector.observer = DictationEraser.shared
         if composition.controller.activate() {
             Log.app.info("hotkey active")
+            startEraseMonitor()
         } else {
             Log.app.error("hotkey activation failed; prompting for Accessibility and polling")
             Permissions.promptForAccessibility()
@@ -94,6 +98,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A paste less than half a second ago still owns the pasteboard; give it back now.
         TextInjector.flushPendingRestore()
         Log.app.info("Sotto terminating")
+    }
+
+    /// The erase input monitor, started only once the hotkey is active: a global monitor
+    /// installs without Accessibility but then never sees key presses, and an epoch that
+    /// never moves would vouch for a target the user had typed into (§6.16).
+    private func startEraseMonitor() {
+        DictationEraser.shared.start()
     }
 
     /// There is no notification for an Accessibility grant, so poll once a second until the
@@ -118,6 +129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 if self.composition.controller.activate() {
                     Log.app.info("Accessibility granted after \(polls, privacy: .public) polls; hotkey active")
+                    self.startEraseMonitor()
                     return
                 }
                 Log.app.error("Accessibility trusted but hotkey activation failed; retrying")
