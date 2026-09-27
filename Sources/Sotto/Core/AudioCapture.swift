@@ -64,6 +64,9 @@ final class AudioCapture: AudioCapturing {
 
     /// What a running capture needs to rebuild itself on a new input device.
     private struct Running {
+        /// Identifies this start. A queued notification for an earlier engine must not match
+        /// a new one, which can be allocated at the same address.
+        let token: UUID
         let engine: AVAudioEngine
         let outputFormat: AVAudioFormat
         let onBuffer: @Sendable (AudioChunk) -> Void
@@ -111,24 +114,28 @@ final class AudioCapture: AudioCapturing {
             let native = try Self.installTap(
                 on: engine, outputFormat: outputFormat, onBuffer: onBuffer, onLevel: onLevel
             )
+            // The engine stops itself when its I/O configuration changes (a device connects
+            // or disconnects, a Bluetooth headset switches profile). Without this the tap
+            // went silent while the utterance kept "listening". Registered before the start
+            // so a change during it is not missed; handled only once `running` is set,
+            // because delivery waits for this lock.
+            let token = UUID()
+            let observer = NotificationCenter.default.addObserver(
+                forName: .AVAudioEngineConfigurationChange, object: engine, queue: notificationQueue
+            ) { [weak self] _ in
+                self?.handleConfigurationChange(of: token)
+            }
             engine.prepare()
             do {
                 try engine.start()
             } catch {
+                NotificationCenter.default.removeObserver(observer)
                 engine.inputNode.removeTap(onBus: 0)
                 Log.audio.error("audio engine start failed: \(error.localizedDescription, privacy: .public)")
                 throw error
             }
-            // The engine stops itself when its I/O configuration changes (a device connects
-            // or disconnects, a Bluetooth headset switches profile). Without this the tap
-            // went silent while the utterance kept "listening".
-            let engineID = ObjectIdentifier(engine)
-            let observer = NotificationCenter.default.addObserver(
-                forName: .AVAudioEngineConfigurationChange, object: engine, queue: notificationQueue
-            ) { [weak self] _ in
-                self?.handleConfigurationChange(of: engineID)
-            }
             storage.running = Running(
+                token: token,
                 engine: engine,
                 outputFormat: outputFormat,
                 onBuffer: onBuffer,
@@ -158,9 +165,13 @@ final class AudioCapture: AudioCapturing {
     /// Re-installs the tap for the new input format and restarts the engine, so a device
     /// change mid-hold costs a moment of audio rather than the rest of the utterance. If that
     /// fails, the utterance is told, so it ends with an error instead of listening to silence.
-    private func handleConfigurationChange(of engineID: ObjectIdentifier) {
+    ///
+    /// The restart runs under the lock on purpose: `stop()` may arrive from the main actor at
+    /// the same moment, and `AVAudioEngine` must not be stopped and restarted concurrently.
+    /// A release during a device change can wait for the restart; that is rare and brief.
+    private func handleConfigurationChange(of token: UUID) {
         let notify: (@Sendable (String) -> Void)? = storage.withLock { storage in
-            guard let running = storage.running, ObjectIdentifier(running.engine) == engineID else {
+            guard let running = storage.running, running.token == token else {
                 Log.audio.debug("audio configuration change for a stopped capture ignored")
                 return nil
             }
