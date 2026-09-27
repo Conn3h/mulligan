@@ -1,0 +1,23 @@
+Tests/SottoAppTests/DictationEraserTests.swift
+  s_54db94c607acba::t_ebecba5a2a90ee 1-333
+Sources/Sotto/Core/SystemEraseTarget.swift
+  s_54db94c607acba::t_071ddeaefc55a1 1-144
+Sources/Sotto/Core/DictationEraser.swift
+  s_54db94c607acba::t_8de4e3de9599ac 1-277
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "bdd26e604000e558c69e7bf15798a5a2b1820e79",
+  "prompts": {},
+  "sessions": {
+    "s_54db94c607acba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9cec764-c6e0-4aee-98d4-309aa9357e9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
