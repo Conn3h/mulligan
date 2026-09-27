@@ -76,3 +76,17 @@ struct SettingsTests {
         #expect(defaults.string(forKey: "eraseKey") == "rightOption")
     }
 }
+
+extension SettingsTests {
+    @Test func firstUseHintsDefaultAndPersist() {
+        let defaults = makeDefaults()
+        let first = Settings(defaults: defaults)
+        #expect(first.redoHintsRemaining == Settings.redoHintBudget)
+        #expect(!first.hasSeenWelcome)
+        first.redoHintsRemaining = 2
+        first.hasSeenWelcome = true
+        let second = Settings(defaults: defaults)
+        #expect(second.redoHintsRemaining == 2)
+        #expect(second.hasSeenWelcome)
+    }
+}
