@@ -1348,8 +1348,8 @@ enum ErasePlan: Equatable {
 4. `.unreadable`, or a record captured without an element (the target was unreadable when
    it was typed): the epoch must equal `record.inputEpoch`, else `.refuse(.inputSince)`; the
    focused window, when AX can name it, must equal the recorded one, else `.inputSince`; the
-   text must hold no newline and at most `unverifiedEraseLimit` Characters (300, confirmed
-   against Claude Code and Codex CLI in the spike below), else `.refuse(.tooLongToVerify)`;
+   text must hold no newline and at most `unverifiedEraseLimit` Characters (500, see §10),
+   else `.refuse(.tooLongToVerify)`;
    when the target is readable now after all, `preceding` must still equal `record.text`,
    else `.refuse(.textChanged)`; then `.backspaces(record.text.count)`.
 
@@ -1433,10 +1433,9 @@ pair explicitly (property observers do not run in an initialiser) and persists t
 the design): with a throwaway build, hold Right ⌥ and tap Right ⌘ in TextEdit, Terminal,
 Ghostty or iTerm2, VS Code or Cursor, Chrome, and Claude Code, and log the `.flagsChanged`
 sequence to confirm the chord arrives as specified on macOS 26. Post marked backspaces while
-Right ⌥ is still held, and confirm each app deletes one character, not a word. Paste 200,
-300, 500 and 1000-character single-line texts into Claude Code and Codex CLI, and record the
-length at which each collapses a paste into a placeholder; set `unverifiedEraseLimit`
-comfortably below the smaller one and record both in §10. Check which of those apps are
+Right ⌥ is still held, and confirm each app deletes one character, not a word. (Done
+2026-09-27: the user confirmed both. The paste-collapse thresholds were read from the tools
+themselves, §10.) Check which of those apps are
 readable (element, selection and preceding text all available).
 
 **Tests** (written first):
@@ -1446,7 +1445,7 @@ readable (element, selection and preceding text all available).
   space Sotto added; different text; an NFC/NFD pair (refused, no normalisation); identical
   text in a different element ("Yes." erased nowhere else); a different window; a caret not at
   `caretEnd`; `preceding` nil at a field start; unreadable with epoch unchanged, epoch
-  changed, window changed, a newline, 300 and 301 Characters; an emoji record (backspaces in
+  changed, window changed, a newline, 500 and 501 Characters; an emoji record (backspaces in
   Characters, range in UTF-16 units).
 - `DictationEraserTests` (monitor feed, AX reads and writes, key posting and the clock behind
   injectable seams): a landing records; user input, clicks, scrolls, app and Space switches
@@ -1571,7 +1570,10 @@ Things that look wrong and are not, or look fine and will bite:
   erasing (§6.16).
 - A long or multi-line paste into Claude Code collapses into a "[Pasted text]" placeholder
   that one backspace deletes whole; counted backspaces would then eat older text. Hence the
-  unverified erase limit (§6.16); the measured thresholds go here after the spike.
+  unverified erase limit (§6.16). Measured 2026-09-27: Claude Code 2.1.283 keeps a paste
+  inline up to 800 characters with at most 2 line breaks and collapses anything larger;
+  Codex CLI 0.154 collapses above 1000 characters (`LARGE_PASTE_CHAR_THRESHOLD`). The limit
+  is 500 single-line Characters, well under both. Recheck when either tool changes.
 - `⌘V` returns before the target has applied the paste. Anything that acts on the pasted
   text (erase) must wait out `pasteCompletionDelay` on the mutation lane (§6.16).
 - Synchronous AX calls block the main actor, the event tap and every timer for up to about
