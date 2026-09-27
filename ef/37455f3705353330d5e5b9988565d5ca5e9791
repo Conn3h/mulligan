@@ -1,0 +1,27 @@
+Tests/SottoAppTests/TerminalAppsTests.swift
+  s_54db94c607acba::t_109b09105135f6 1-23
+Sources/Sotto/Core/TextInjector.swift
+  s_54db94c607acba::t_7bd41dfda83f70 172-173,186-189,191,193-197
+Sources/Sotto/Core/SystemEraseTarget.swift
+  s_54db94c607acba::t_7bd41dfda83f70 19
+docs/SPEC.md
+  s_54db94c607acba::t_7bd41dfda83f70 1330-1336
+Sources/Sotto/Core/TerminalApps.swift
+  s_54db94c607acba::t_7bd41dfda83f70 1-21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "ef37455f3705353330d5e5b9988565d5ca5e9791",
+  "prompts": {},
+  "sessions": {
+    "s_54db94c607acba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9cec764-c6e0-4aee-98d4-309aa9357e9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
