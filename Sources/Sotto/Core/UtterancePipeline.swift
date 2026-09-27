@@ -25,6 +25,7 @@ final class UtterancePipeline {
     typealias SoundPlayer = @MainActor () -> Void
     typealias EngineNameReader = @MainActor () -> String
     typealias FrontmostProcessReader = @MainActor () -> pid_t?
+    typealias DeliveryMarker = @MainActor () -> Void
 
     private static let endSoundName = "Pop"
     static let focusMovedMessage = "You switched apps before the text was ready; it is in History."
@@ -37,6 +38,7 @@ final class UtterancePipeline {
     private let inject: Injector
     private let playEndSound: SoundPlayer
     private let readFrontmostProcessID: FrontmostProcessReader
+    private let markDeliveryStarted: DeliveryMarker
     private let clock = ContinuousClock()
 
     /// Every closure is a seam for tests. The app uses the defaults: the shared settings
@@ -50,7 +52,8 @@ final class UtterancePipeline {
         playEndSound: @escaping SoundPlayer = UtterancePipeline.playSystemEndSound,
         readFrontmostProcessID: @escaping FrontmostProcessReader = {
             NSWorkspace.shared.frontmostApplication?.processIdentifier
-        }
+        },
+        markDeliveryStarted: @escaping DeliveryMarker = { TextInjector.observer?.supersede() }
     ) {
         self.readEngineName = readEngineName
         self.readSettings = readSettings
@@ -59,12 +62,18 @@ final class UtterancePipeline {
         self.inject = inject
         self.playEndSound = playEndSound
         self.readFrontmostProcessID = readFrontmostProcessID
+        self.markDeliveryStarted = markDeliveryStarted
     }
 
     /// Returns a message for the user when the text was recorded but not typed.
     @discardableResult
     func process(raw: String, utterance: Utterance) async -> String? {
         let entered = clock.now
+        // From here until this delivery's text lands (if it does), the previous record is no
+        // longer the last dictation; an erase meanwhile must refuse, not erase it (§6.16).
+        if utterance.source == .hotkey {
+            markDeliveryStarted()
+        }
         let settings = readSettings()
         let formatter = Self.formatter(cleanupEnabled: settings.cleanupEnabled, smartCleanup: settings.smartCleanup)
         let formatted = await formatter.text.format(raw)

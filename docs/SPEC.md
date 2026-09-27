@@ -1354,9 +1354,11 @@ enum ErasePlan: Equatable {
    when the target is readable now after all, `preceding` must still equal `record.text`,
    else `.refuse(.textChanged)`; then `.backspaces(record.text.count)`.
 
-**Executing.** All AX calls in this section and in `TextInjector` use
-`AXUIElementSetMessagingTimeout` of 250 ms on each element (the default is about 6 s, which
-would freeze the main actor, the event tap and the controller's timers). Before any key is
+**Executing.** All AX calls in this section and in `TextInjector` run under a process-wide
+`AXUIElementSetMessagingTimeout` of 1 s, set once at launch on the system-wide element (the
+default is about 6 s, which would freeze the main actor, the event tap and the controller's
+timers). Not shorter: the insert path shares it, and an AX write that times out on Sotto's
+side but still lands in a slow app would fall back to a paste and type the text twice. Before any key is
 posted, wait (bounded to 1 s) until the erase modifier is physically up
 (`CGEventSource.keyState` by keycode), so no posted key can be read together with a held
 Command; push to talk is still down, so every posted key is built from a `.privateState`
@@ -1578,7 +1580,8 @@ Things that look wrong and are not, or look fine and will bite:
 - `⌘V` returns before the target has applied the paste. Anything that acts on the pasted
   text (erase) must wait out `pasteCompletionDelay` on the mutation lane (§6.16).
 - Synchronous AX calls block the main actor, the event tap and every timer for up to about
-  6 s on a hung target; set `AXUIElementSetMessagingTimeout` (§6.16).
+  6 s on a hung target; set `AXUIElementSetMessagingTimeout` (§6.16), but not so short that
+  a slow app's insert times out on Sotto's side and is pasted a second time.
 - Matching text is not identity: "Yes." before the caret in another field is not Sotto's.
   Compare the focused element with `CFEqual` (§6.16).
 
