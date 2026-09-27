@@ -202,10 +202,21 @@ struct ParakeetSpeechEngineTests {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/say")
         process.arguments = ["-o", url.path, text]
         try process.run()
-        process.waitUntilExit()
+        // `say` can wedge at the system level; an unbounded wait hung the whole suite.
+        let deadline = Date().addingTimeInterval(sayTimeout)
+        while process.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if process.isRunning {
+            process.terminate()
+            Issue.record("/usr/bin/say did not finish within \(sayTimeout) s")
+            throw CancellationError()
+        }
         try #require(process.terminationStatus == 0)
         return url
     }
+
+    private static let sayTimeout: TimeInterval = 30
 
     /// Reads the whole file, converts it to `format`, and slices it as capture would.
     private static func chunks(of url: URL, in format: AVAudioFormat) throws -> [AudioChunk] {
