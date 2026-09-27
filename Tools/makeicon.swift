@@ -1,7 +1,7 @@
 // Renders Resources/AppIcon.iconset from code, so the icon is regenerable and reviewable.
 // Run: swift Tools/makeicon.swift && iconutil -c icns Resources/AppIcon.iconset -o Resources/AppIcon.icns
 //
-// The mark: Sotto's level meter at rest, a calm five-bar waveform in off-white on the
+// The mark: Mulligan's level meter at rest, a calm five-bar waveform in off-white on the
 // app's charcoal ink, with the single coral recording lamp in the top corner. Flat fills
 // and one hairline highlight; the palette is the app's own design tokens.
 import AppKit

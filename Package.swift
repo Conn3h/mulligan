@@ -2,11 +2,11 @@
 import PackageDescription
 
 // Three products, deliberately split:
-// - SottoText and SottoDictionary are Foundation-only and platform-neutral, so every
+// - MulliganText and MulliganDictionary are Foundation-only and platform-neutral, so every
 //   line of text processing is unit-testable without a window, a microphone, or macOS 26.
-// - Sotto is the app: AppKit, SwiftUI, Speech, and the OS-level machinery.
+// - Mulligan is the app: AppKit, SwiftUI, Speech, and the OS-level machinery.
 let package = Package(
-    name: "Sotto",
+    name: "Mulligan",
     platforms: [.macOS(.v26)],
     dependencies: [
         // NVIDIA Parakeet TDT as CoreML, behind the engine seam as an experimental second engine
@@ -15,41 +15,41 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "SottoText",
-            path: "Sources/SottoText",
+            name: "MulliganText",
+            path: "Sources/MulliganText",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .target(
-            name: "SottoDictionary",
-            path: "Sources/SottoDictionary",
+            name: "MulliganDictionary",
+            path: "Sources/MulliganDictionary",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .executableTarget(
-            name: "Sotto",
+            name: "Mulligan",
             dependencies: [
-                "SottoText",
-                "SottoDictionary",
+                "MulliganText",
+                "MulliganDictionary",
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ],
-            path: "Sources/Sotto",
+            path: "Sources/Mulligan",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
-            name: "SottoTextTests",
-            dependencies: ["SottoText"],
-            path: "Tests/SottoTextTests",
+            name: "MulliganTextTests",
+            dependencies: ["MulliganText"],
+            path: "Tests/MulliganTextTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
-            name: "SottoAppTests",
-            dependencies: ["Sotto"],
-            path: "Tests/SottoAppTests",
+            name: "MulliganAppTests",
+            dependencies: ["Mulligan"],
+            path: "Tests/MulliganAppTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
-            name: "SottoDictionaryTests",
-            dependencies: ["SottoDictionary"],
-            path: "Tests/SottoDictionaryTests",
+            name: "MulliganDictionaryTests",
+            dependencies: ["MulliganDictionary"],
+            path: "Tests/MulliganDictionaryTests",
             resources: [.copy("vectors.json")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),

@@ -22,7 +22,7 @@ input=$1
 width=${2:-960}
 out_dir=$(cd "$(dirname "$0")/.." && pwd)/docs/media
 out=$out_dir/demo.gif
-palette=$(mktemp -t sotto-palette).png
+palette=$(mktemp -t mulligan-palette).png
 trap 'rm -f "$palette"' EXIT
 
 mkdir -p "$out_dir"
@@ -35,4 +35,4 @@ ffmpeg -v error -y -i "$input" -i "$palette" \
 size=$(du -h "$out" | cut -f1)
 echo "wrote $out ($size)"
 echo "README embed, under the tagline:"
-echo '![Sotto: hold a key, talk, release](docs/media/demo.gif)'
+echo '![Mulligan: hold a key, talk, release](docs/media/demo.gif)'
