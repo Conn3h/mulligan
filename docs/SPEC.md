@@ -1329,10 +1329,14 @@ restore would already have broken it.
 
 **Terminals** (`Core/TerminalApps.swift`, by bundle id: Ghostty, Terminal, iTerm2, WezTerm,
 kitty, Alacritty, Warp) expose their whole screen buffer through Accessibility, not the line
-being edited, so their text can never prove anything: `TextInjector.focusedTarget()` returns
-only the window there, both when recording and when erasing, and erase takes the unverified
-path. Found in acceptance (2026-09-27): Ghostty's text read back as the screen and every erase
-refused.
+being edited, so the screen's text can never prove anything. `TextInjector.focusedTarget()`
+marks a terminal app's focused element as a **screen** unless its role is a real text field
+(`AXTextField`, `AXComboBox`: a search or rename box reads back like any other field). A
+screen keeps its element and window identity (records carry `textProvable = false`; read-back
+is `ReadBack.screen`, whose text and selection are never used), so erase takes the unverified
+path with identity checks. Found in acceptance (2026-09-27): Ghostty's text read back as the
+screen and every erase refused; Codex round 4 then showed that marking whole apps unreadable
+also stripped the protections from their real text fields.
 
 **Plan** (`ErasePlan.decide`, pure and unit-tested; inputs are the record, `superseded`, the
 current epoch, the frontmost pid, and a `ReadBack` taken just now):
@@ -1365,8 +1369,10 @@ enum ErasePlan: Equatable {
    A record that has an element is only ever erased this way: if the target is unreadable
    now (focus moved) → `.refuse(.inputSince)`; if the record has no `caretEnd` →
    `.refuse(.textChanged)`.
-4. A record captured without an element (the target was unreadable when it was typed): the
-   epoch must equal `record.inputEpoch`, else `.refuse(.inputSince)`; the
+4. A record captured without an element (the target was unreadable when it was typed), or a
+   terminal screen's: the recorded element, when there is one, must be the focused one, and
+   the recorded window, when there is one, must be the one in front (a window that cannot be
+   read now fails closed; `ErasePlan.identityHolds`); the epoch must equal `record.inputEpoch`, else `.refuse(.inputSince)`; the
    focused window, when AX can name it, must equal the recorded one, else `.inputSince`; the
    text must hold no newline and at most `unverifiedEraseLimit` Characters (500, see §10),
    else `.refuse(.tooLongToVerify)`;
@@ -1390,16 +1396,18 @@ the input monitor does not see), the erase stops.
 
 - `.deleteRange`: first try AX alone: set `kAXSelectedTextRangeAttribute` to the range, read
   it back, and require it to equal the range exactly. A field that reads but will not take a
-  selection gets **checked backspaces** instead. The ChatGPT app (acceptance, 2026-09-27)
-  reports that setting the selection failed and then applies it a moment later, so after a
-  refusal the eraser waits 200 ms and, if the selection has landed exactly, uses it as a
-  selection; only otherwise does it backspace. Checked backspaces start with **one**
-  backspace (if the app deletes more for it, the check after it stops the run with only the
-  dictation's own last characters gone), then bursts of 10, each proven first (focused element ours, caret collapsed exactly
+  selection is handled by what it says about itself. One whose selection attribute is not
+  settable gets **checked backspaces** (no selection is ever requested, so none can land
+  mid-run): one key at a time, each proven first (focused element ours, caret collapsed exactly
   after the remaining dictation, the text before it exactly that remainder, no input, same
   app, erase modifier up) and each verified afterwards (the caret moved back by the burst
-  within 500 ms); any mismatch stops the run. A selection that lands late is non-collapsed at
-  the first check, so nothing is posted. Otherwise, once the selection took: then set `kAXSelectedTextAttribute` to
+  within 500 ms); any mismatch stops the run. One that is settable but refuses: the ChatGPT app
+  (acceptance, 2026-09-27) reports failure and then applies it a moment later, so the eraser
+  waits 200 ms and uses a selection that has landed exactly; if none lands it refuses
+  (`.failed`), because a pending request could still land during backspaces and turn one into
+  a deletion of the selection and more. Before any selection is deleted, the same
+  `isStillOurSelection` check as the fallback backspace runs (text may have shifted during
+  the wait). Once the selection took: then set `kAXSelectedTextAttribute` to
   `""` and poll (up to 150 ms, as §6.8) for the caret at `location` with the length shrunk by
   `n`. If the write did not verify, post one backspace (which deletes only the selection) and
   poll again, but only after checking, right before posting, that the same app is in front,
@@ -1410,7 +1418,8 @@ the input monitor does not see), the erase stops.
   counted-backspace fallback on a readable target.
 - `.backspaces(count)`: post key-down/key-up pairs of kVK_Delete (marked, empty flags) in
   chunks of 10, yielding 2 ms between chunks. Before each chunk, re-check the epoch and the
-  frontmost pid against the record's; a change stops the run with `.interrupted`. Posting
+  frontmost pid against the record's, the erase modifier, and `identityHolds` on a fresh read
+  (a terminal pane or window can change without input); a change stops the run with `.interrupted`. Posting
   reports how many keys it actually managed; a shortfall stops the run (`.interrupted`, or
   `.failed` when nothing was posted), so a failed event creation is never reported as
   erased. Log the count posted, not the text.

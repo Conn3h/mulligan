@@ -18,6 +18,9 @@ final class SystemEraseTarget: EraseTarget {
         guard let element = focus.element else {
             return .unreadable(window: focus.window)
         }
+        if focus.isScreen {
+            return .screen(element: element, window: focus.window, selection: TextInjector.selectedRange(of: element.element))
+        }
         guard let selection = TextInjector.selectedRange(of: element.element) else {
             return .unreadable(window: focus.window)
         }

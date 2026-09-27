@@ -358,9 +358,11 @@ final class DictationEraser: TypingObserver {
         var remaining = count
         var posted = 0
         while remaining > 0 {
-            // The erase key pressed again is a modifier change the input monitor does not see.
+            // The erase key pressed again is a modifier change the input monitor does not see,
+            // and a terminal pane or window can change under the run without any input.
             let changed = inputEpoch != epoch || target.frontmostProcessID() != record.processID
                 || eraseModifierIsDown()
+                || !ErasePlan.identityHolds(record: record, readBack: target.readBack(utf16Length: 0))
             if token.isRevoked || changed {
                 Log.inject.info(
                     "erase: stopped after \(posted, privacy: .public) of \(count, privacy: .public) backspaces (revoked \(token.isRevoked, privacy: .public), input or app changed \(changed, privacy: .public))"

@@ -12,13 +12,16 @@ struct ErasePlanTests {
     private let spoken = " Hello there."
 
     private func record(
-        _ text: String? = nil, element: Bool = true, caretEnd: Int? = 40, epoch: UInt64 = 7
+        _ text: String? = nil, element: Bool = true, caretEnd: Int? = 40, epoch: UInt64 = 7,
+        window: Bool = true, provable: Bool = true
     ) -> TypedDictation {
-        TypedDictation(
-            text: text ?? spoken, processID: 42, element: element ? field : nil, window: window,
-            caretEnd: element ? caretEnd : nil, landedAt: ContinuousClock().now,
+        var typed = TypedDictation(
+            text: text ?? spoken, processID: 42, element: element ? field : nil, window: window ? self.window : nil,
+            caretEnd: element && provable ? caretEnd : nil, landedAt: ContinuousClock().now,
             previousInjection: nil, inputEpoch: epoch
         )
+        typed.textProvable = provable
+        return typed
     }
 
     private func caret(
@@ -119,8 +122,40 @@ struct ErasePlanTests {
         #expect(decide(record(element: false), .unreadable(window: otherWindow)) == .refuse(.inputSince))
     }
 
-    @Test func unreadableUnknownWindowStillErases() {
-        #expect(decide(record(element: false), .unreadable(window: nil)) == .backspaces(count: spoken.count))
+    /// A window known when the text landed must still be the one in front (Codex, round 4).
+    @Test func aKnownWindowThatCannotBeReadNowRefuses() {
+        #expect(decide(record(element: false), .unreadable(window: nil)) == .refuse(.inputSince))
+    }
+
+    @Test func noWindowOnEitherSideStillErases() {
+        #expect(decide(record(element: false, window: false), .unreadable(window: nil)) == .backspaces(count: spoken.count))
+    }
+
+    // A terminal's screen: identity and window are checked, its text never proves anything.
+
+    private func screen(_ element: AXElementID? = nil, window: AXElementID? = nil, selection: CFRange? = nil) -> ReadBack {
+        .screen(element: element ?? field, window: window ?? self.window, selection: selection)
+    }
+
+    @Test func aTerminalScreenErasesByBackspaces() {
+        #expect(decide(record(provable: false), screen()) == .backspaces(count: spoken.count))
+    }
+
+    @Test func aTerminalScreenIgnoresItsSelection() {
+        #expect(decide(record(provable: false), screen(selection: CFRange(location: 0, length: 900)))
+            == .backspaces(count: spoken.count))
+    }
+
+    @Test func anotherTerminalPaneIsNotOurs() {
+        #expect(decide(record(provable: false), screen(otherField)) == .refuse(.inputSince))
+    }
+
+    @Test func aTerminalScreenStillNeedsUnchangedInput() {
+        #expect(decide(record(epoch: 1, provable: false), epoch: 2, screen()) == .refuse(.inputSince))
+    }
+
+    @Test func aProvableRecordFacingAScreenRefuses() {
+        #expect(decide(record(), screen()) == .refuse(.inputSince))
     }
 
     @Test func unreadableNewline() {

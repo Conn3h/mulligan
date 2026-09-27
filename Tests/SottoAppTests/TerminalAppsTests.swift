@@ -20,4 +20,17 @@ struct TerminalAppsTests {
     @Test func anUnknownAppIsNot() {
         #expect(!TerminalApps.isTerminal(bundleID: nil))
     }
+
+    /// Inside a terminal app, a real text field (search, rename) is an ordinary readable
+    /// field; anything else is the screen (Codex, round 4).
+    @Test func aTerminalsTextFieldIsNotItsScreen() {
+        #expect(!TerminalApps.isScreen(bundleID: "com.googlecode.iterm2", role: "AXTextField"))
+        #expect(!TerminalApps.isScreen(bundleID: "com.googlecode.iterm2", role: "AXComboBox"))
+        #expect(TerminalApps.isScreen(bundleID: "com.googlecode.iterm2", role: "AXTextArea"))
+        #expect(TerminalApps.isScreen(bundleID: "com.mitchellh.ghostty", role: nil))
+    }
+
+    @Test func nothingOutsideATerminalIsAScreen() {
+        #expect(!TerminalApps.isScreen(bundleID: "com.apple.TextEdit", role: "AXTextArea"))
+    }
 }

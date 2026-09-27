@@ -130,10 +130,18 @@ enum TextInjector {
         return (.landed, settle)
     }
 
+    /// The focused element and its window, when readable. `isScreen` marks a terminal's
+    /// screen, whose text never proves anything (`TerminalApps`).
+    struct FocusedTarget {
+        let element: AXElementID?
+        let window: AXElementID?
+        let isScreen: Bool
+    }
+
     /// Everything about the target known before an insert.
     private struct InsertTarget {
         let processID: pid_t?
-        let focus: (element: AXElementID?, window: AXElementID?)
+        let focus: FocusedTarget
         let inputEpoch: UInt64
         let generation: UInt64
         let previousInjection: LastInjectionSnapshot?
@@ -161,24 +169,24 @@ enum TextInjector {
             processID: processID,
             element: touched ? nil : target.focus.element,
             window: touched ? nil : target.focus.window,
-            caretEnd: touched ? nil : caretEnd,
+            caretEnd: touched || target.focus.isScreen ? nil : caretEnd,
             landedAt: injectionClock.now,
             previousInjection: target.previousInjection,
             inputEpoch: target.inputEpoch,
-            generation: target.generation
+            generation: target.generation,
+            textProvable: !target.focus.isScreen
         ))
     }
 
-    /// The focused element and its window, when readable. In a terminal only the window is
-    /// returned (`TerminalApps`).
-    static func focusedTarget() -> (element: AXElementID?, window: AXElementID?) {
+    /// Read before an insert and at erase time, so the eraser can tell this field apart.
+    static func focusedTarget() -> FocusedTarget {
         var focusedValue: CFTypeRef?
         let focusedError = AXUIElementCopyAttributeValue(
             AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute as CFString, &focusedValue
         )
         guard focusedError == .success, let focusedValue, CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else {
             Log.inject.debug("no readable focused element (AXError \(focusedError.rawValue, privacy: .public))")
-            return (nil, nil)
+            return FocusedTarget(element: nil, window: nil, isScreen: false)
         }
         let focused = focusedValue as! AXUIElement
         var windowValue: CFTypeRef?
@@ -190,11 +198,15 @@ enum TextInjector {
             Log.inject.debug("focused element has no readable window (AXError \(windowError.rawValue, privacy: .public))")
             window = nil
         }
-        // A terminal's text is its screen, not the edited line: never offered as readable.
-        if TerminalApps.isTerminal(bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
-            return (nil, window)
+        var roleValue: CFTypeRef?
+        let roleError = AXUIElementCopyAttributeValue(focused, kAXRoleAttribute as CFString, &roleValue)
+        if roleError != .success {
+            Log.inject.debug("focused element role unreadable (AXError \(roleError.rawValue, privacy: .public))")
         }
-        return (AXElementID(element: focused), window)
+        let isScreen = TerminalApps.isScreen(
+            bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier, role: roleValue as? String
+        )
+        return FocusedTarget(element: AXElementID(element: focused), window: window, isScreen: isScreen)
     }
 
     enum Outcome: Sendable, Equatable {

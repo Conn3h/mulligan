@@ -186,6 +186,10 @@ struct DictationEraserTests {
         _ target: FakeEraseTarget = FakeEraseTarget(), monitor: FakeInputMonitor = FakeInputMonitor()
     ) -> (DictationEraser, FakeEraseTarget, FakeInputMonitor, Spy) {
         let spy = Spy()
+        // An unreadable target still names the recorded window, as terminals do.
+        if case .unreadable(window: nil) = target.read {
+            target.read = .unreadable(window: window)
+        }
         let eraser = DictationEraser(
             target: target, monitor: monitor,
             eraseKey: { .rightCommand },
@@ -688,5 +692,32 @@ struct DictationEraserTests {
         #expect(await eraser.eraseLast(token: EraseToken()) == .failed)
         #expect(target.posted.isEmpty)
         #expect(target.field == older + latest)
+    }
+
+    // MARK: Identity during a run (Codex, round 4)
+
+    @Test func backspacesStopWhenTheWindowChangesMidRun() async {
+        let (eraser, target, _, _) = makeEraser()
+        let otherWindow = AXElementID(element: AXUIElementCreateApplication(202))
+        target.onPost = { _ in target.read = .unreadable(window: otherWindow) }
+        _ = typed(String(repeating: "a", count: 35), readable: false, eraser: eraser)
+        #expect(await eraser.eraseLast(token: EraseToken()) == .interrupted)
+        #expect(target.posted == [10])
+    }
+
+    @Test func aTerminalRunStopsWhenAnotherPaneTakesFocus() async {
+        let (eraser, target, _, _) = makeEraser()
+        let otherPane = AXElementID(element: AXUIElementCreateApplication(104))
+        target.read = .screen(element: field, window: window, selection: nil)
+        target.onPost = { _ in target.read = .screen(element: otherPane, window: self.window, selection: nil) }
+        var typed = TypedDictation(
+            text: String(repeating: "a", count: 35), processID: 42, element: field, window: window, caretEnd: nil,
+            landedAt: ContinuousClock().now, previousInjection: nil, inputEpoch: eraser.inputEpoch,
+            generation: eraser.deliveryGeneration
+        )
+        typed.textProvable = false
+        eraser.recordTyped(typed)
+        #expect(await eraser.eraseLast(token: EraseToken()) == .interrupted)
+        #expect(target.posted == [10])
     }
 }

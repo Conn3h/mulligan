@@ -38,6 +38,9 @@ struct TypedDictation: Sendable, Equatable {
     /// The delivery this insert belongs to. Only the current delivery's landing makes the
     /// record current again; an older paste settling late must not (§6.16).
     var generation: UInt64 = 0
+    /// False for a terminal's screen, whose Accessibility text is the whole screen rather than
+    /// the edited line: identity and window still count, the text proves nothing.
+    var textProvable = true
 
     /// Whether the focus and caret read after an insert can be trusted as that insert's: only
     /// when the input monitor is running and saw nothing while the text landed. Otherwise a
@@ -54,11 +57,18 @@ enum ReadBack: Equatable {
     /// `preceding` is the record's UTF-16 length of text ending at the selection's end, nil
     /// when that range is out of bounds.
     case readable(element: AXElementID, window: AXElementID?, selection: CFRange, preceding: String?)
+    /// A terminal's screen: the element and window are known, its text and selection are not
+    /// the edited line and are never used.
+    case screen(element: AXElementID, window: AXElementID?, selection: CFRange?)
 
     static func == (lhs: ReadBack, rhs: ReadBack) -> Bool {
         switch (lhs, rhs) {
         case let (.unreadable(left), .unreadable(right)):
             return left == right
+        case let (.screen(leftElement, leftWindow, leftSelection), .screen(rightElement, rightWindow, rightSelection)):
+            return leftElement == rightElement && leftWindow == rightWindow
+                && leftSelection?.location == rightSelection?.location
+                && leftSelection?.length == rightSelection?.length
         case let (.readable(leftElement, leftWindow, leftSelection, leftText),
                   .readable(rightElement, rightWindow, rightSelection, rightText)):
             return leftElement == rightElement && leftWindow == rightWindow
@@ -128,7 +138,7 @@ enum ErasePlan: Equatable {
         }
         // A field that was readable when Sotto typed into it is erased on proof or not at all:
         // unreadable now means focus moved, and without the caret there is nothing to prove.
-        if let recordedElement = record.element {
+        if let recordedElement = record.element, record.textProvable {
             guard case let .readable(element, window, selection, preceding) = readBack else {
                 return .refuse(.inputSince)
             }
@@ -170,31 +180,54 @@ enum ErasePlan: Equatable {
         return .deleteRange(location: start, length: length)
     }
 
-    /// No proof from the target: nothing may have happened since the insert, and the text
-    /// must be short and single-line enough that terminals kept it as typed characters.
+    /// No proof from the target: nothing may have happened since the insert, it must be the
+    /// same field (when one was recorded) in the same window (when one was recorded; a window
+    /// that cannot be read now fails closed), and the text must be short and single-line
+    /// enough that terminals kept it as typed characters.
     private static func decideUnverified(record: TypedDictation, epoch: UInt64, readBack: ReadBack) -> ErasePlan {
         guard epoch == record.inputEpoch else {
             return .refuse(.inputSince)
         }
-        let window: AXElementID?
-        switch readBack {
-        case .unreadable(let current):
-            window = current
-        case .readable(_, let current, let selection, let preceding):
-            window = current
+        guard identityHolds(record: record, readBack: readBack) else {
+            return .refuse(.inputSince)
+        }
+        if case let .readable(_, _, selection, preceding) = readBack {
             // A selection (the paste left selected, say) would swallow the first backspace
             // whole, and the rest would eat older text.
             guard selection.length == 0, sameUnits(preceding, record.text) else {
                 return .refuse(.textChanged)
             }
         }
-        if let window, let recordedWindow = record.window, window != recordedWindow {
-            return .refuse(.inputSince)
-        }
         guard !record.text.contains(where: \.isNewline), record.text.count <= unverifiedLimit else {
             return .refuse(.tooLongToVerify)
         }
         return .backspaces(count: record.text.count)
+    }
+
+    /// The field and window in front are the recorded ones. Checked again before every burst
+    /// of unverified backspaces: a terminal pane or window can change under the run without
+    /// any input the monitor would see.
+    static func identityHolds(record: TypedDictation, readBack: ReadBack) -> Bool {
+        let element: AXElementID?
+        let window: AXElementID?
+        switch readBack {
+        case .unreadable(let current):
+            element = nil
+            window = current
+        case let .screen(current, currentWindow, _):
+            element = current
+            window = currentWindow
+        case let .readable(current, currentWindow, _, _):
+            element = current
+            window = currentWindow
+        }
+        if let recordedElement = record.element, element != recordedElement {
+            return false
+        }
+        if let recordedWindow = record.window, window != recordedWindow {
+            return false
+        }
+        return true
     }
 
     /// UTF-16 unit for unit. Swift's `==` treats canonically equivalent strings as equal, but
