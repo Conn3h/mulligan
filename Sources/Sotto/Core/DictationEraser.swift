@@ -25,8 +25,10 @@ protocol EraseTarget: AnyObject {
     func deleteSelection(in element: AXElementID) -> Bool
     func selection(in element: AXElementID) -> CFRange?
     func characterCount(in element: AXElementID) -> Int?
-    /// Marked kVK_Delete presses with empty flags from a private event source.
-    func postBackspaces(_ count: Int)
+    /// Marked kVK_Delete presses with empty flags from a private event source. Returns how
+    /// many were actually posted (event creation can fail).
+    @discardableResult
+    func postBackspaces(_ count: Int) -> Int
     func isKeyDown(_ keyCode: Int64) -> Bool
 }
 
@@ -67,6 +69,7 @@ final class DictationEraser: TypingObserver {
     private var superseded = false
     private var monitoring = false
     private(set) var inputEpoch: UInt64 = 0
+    private(set) var deliveryGeneration: UInt64 = 0
 
     init(
         target: any EraseTarget,
@@ -98,11 +101,14 @@ final class DictationEraser: TypingObserver {
 
     func recordTyped(_ typed: TypedDictation) {
         record = typed
-        superseded = false
+        // An older delivery's paste settling after a newer delivery began is still not the
+        // last dictation: only the current delivery's landing clears the mark.
+        superseded = typed.generation != deliveryGeneration
         Log.inject.debug("erase record: \(typed.text.count, privacy: .public) chars, readable \(typed.element != nil, privacy: .public)")
     }
 
     func supersede() {
+        deliveryGeneration &+= 1
         superseded = true
     }
 
@@ -120,17 +126,18 @@ final class DictationEraser: TypingObserver {
             return .nothingToErase
         }
         self.record = nil
-        // Without a monitor the epoch cannot vouch for anything, so it is made to differ:
-        // an unreadable target then always refuses (fail closed).
-        let epoch = monitoring ? inputEpoch : record.inputEpoch &+ 1
-        let plan = ErasePlan.decide(
-            record: record,
-            superseded: superseded,
-            epoch: epoch,
-            frontmostPID: target.frontmostProcessID(),
-            readBack: target.readBack(utf16Length: record.text.utf16.count)
-        )
+        let wasSuperseded = superseded
         let started = clock.now
+        // Plan once to refuse at once when it can, then wait for the erase key to come up and
+        // plan again from a fresh read: the user may have moved the caret meanwhile, and the
+        // mutation must act on what is true now, not a moment ago.
+        var plan = currentPlan(for: record, superseded: wasSuperseded)
+        if case .refuse = plan {
+        } else if await waitForModifierUp(token: token) {
+            plan = currentPlan(for: record, superseded: wasSuperseded)
+        } else {
+            plan = .refuse(.failed)
+        }
         let outcome: EraseOutcome
         switch plan {
         case .refuse(let reason):
@@ -149,17 +156,30 @@ final class DictationEraser: TypingObserver {
         return outcome
     }
 
+    private func currentPlan(for record: TypedDictation, superseded: Bool) -> ErasePlan {
+        // Without a monitor the epoch cannot vouch for anything, so it is made to differ:
+        // an unreadable target then always refuses (fail closed).
+        let epoch = monitoring ? inputEpoch : record.inputEpoch &+ 1
+        return ErasePlan.decide(
+            record: record,
+            superseded: superseded,
+            epoch: epoch,
+            frontmostPID: target.frontmostProcessID(),
+            readBack: target.readBack(utf16Length: record.text.utf16.count)
+        )
+    }
+
     /// Readable and proven: select exactly the range, delete it through AX, and verify. If
-    /// the AX write did not take and the selection is still exactly the range, one backspace
-    /// deletes only that selection. Never counted backspaces here.
+    /// the AX write did not take, one backspace deletes the selection, but only after checking
+    /// again that the same app and field are in front, nothing was touched, and the selection
+    /// is still exactly our text: the backspace goes to whatever has focus, not to the element.
+    /// Never counted backspaces here.
     private func deleteRange(_ range: CFRange, record: TypedDictation, token: EraseToken) async -> EraseOutcome {
         guard let element = record.element else {
             Log.inject.error("erase: a range plan without a recorded element")
             return .failed
         }
-        guard await waitForModifierUp(token: token) else {
-            return .failed
-        }
+        let epoch = inputEpoch
         guard target.select(range, in: element) else {
             Log.inject.info("erase: selection \(range.location, privacy: .public)+\(range.length, privacy: .public) did not take")
             return .failed
@@ -174,22 +194,37 @@ final class DictationEraser: TypingObserver {
         if await verifyDeleted(range, countBefore: countBefore, in: element) {
             return .erased
         }
-        guard let now = target.selection(in: element), now.location == range.location, now.length == range.length else {
-            let now = target.selection(in: element)
+        guard !token.isRevoked, isStillOurSelection(range, element: element, record: record, epoch: epoch) else {
             Log.inject.error(
-                "erase: AX delete unverified and the selection moved (\(range.location, privacy: .public)+\(range.length, privacy: .public) -> \(now.map { "\($0.location)+\($0.length)" } ?? "unreadable", privacy: .public)); stopping"
+                "erase: AX delete unverified and the field, focus or input changed (range \(range.location, privacy: .public)+\(range.length, privacy: .public)); stopping"
             )
             return .failed
         }
-        guard !token.isRevoked else {
+        guard target.postBackspaces(1) == 1 else {
             return .failed
         }
-        target.postBackspaces(1)
         if await verifyDeleted(range, countBefore: countBefore, in: element) {
             return .erased
         }
         Log.inject.error("erase: the selection-delete backspace did not verify")
         return .failed
+    }
+
+    /// Right before a key that goes to whatever has focus: same app in front, no user input,
+    /// the focused element is ours, its selection is exactly our range, and the text in it is
+    /// still exactly what Sotto typed.
+    private func isStillOurSelection(_ range: CFRange, element: AXElementID, record: TypedDictation, epoch: UInt64) -> Bool {
+        guard inputEpoch == epoch, target.frontmostProcessID() == record.processID else {
+            return false
+        }
+        guard case let .readable(focused, _, selection, preceding) = target.readBack(utf16Length: range.length),
+              focused == element,
+              selection.location == range.location, selection.length == range.length,
+              let preceding, preceding.utf16.elementsEqual(record.text.utf16)
+        else {
+            return false
+        }
+        return true
     }
 
     /// The caret sits at the range's start and, when the field reports a length, it shrank by
@@ -216,10 +251,8 @@ final class DictationEraser: TypingObserver {
     /// Unreadable and inferred untouched: backspaces in bursts, stopping the moment the user
     /// does anything or another app comes to the front.
     private func backspaces(_ count: Int, record: TypedDictation, token: EraseToken) async -> EraseOutcome {
-        guard await waitForModifierUp(token: token) else {
-            return .failed
-        }
-        let epoch = inputEpoch
+        // The plan held with the record's epoch, so any input since it landed stops the run.
+        let epoch = record.inputEpoch
         var remaining = count
         var posted = 0
         while remaining > 0 {
@@ -231,9 +264,13 @@ final class DictationEraser: TypingObserver {
                 return posted == 0 ? .failed : .interrupted
             }
             let burst = min(Self.chunkSize, remaining)
-            target.postBackspaces(burst)
-            posted += burst
-            remaining -= burst
+            let managed = target.postBackspaces(burst)
+            posted += managed
+            remaining -= managed
+            if managed < burst {
+                Log.inject.error("erase: only \(managed, privacy: .public) of \(burst, privacy: .public) backspaces could be posted")
+                return posted == 0 ? .failed : .interrupted
+            }
             await pause(Self.chunkPause)
         }
         return .erased
@@ -251,8 +288,8 @@ final class DictationEraser: TypingObserver {
                 return false
             }
             guard clock.now < deadline else {
-                Log.inject.info("erase: the erase key is still down after \(Self.modifierWaitCap, privacy: .public); going ahead")
-                break
+                Log.inject.info("erase: the erase key is still down after \(Self.modifierWaitCap, privacy: .public); not erasing")
+                return false
             }
             await pause(Self.modifierPoll)
         }

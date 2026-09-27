@@ -98,6 +98,7 @@ enum TextInjector {
             processID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
             focus: focusedTarget(),
             inputEpoch: observer?.inputEpoch ?? 0,
+            generation: observer?.deliveryGeneration ?? 0,
             previousInjection: lastInjection
         )
         let reason: String
@@ -131,6 +132,7 @@ enum TextInjector {
         let processID: pid_t?
         let focus: (element: AXElementID?, window: AXElementID?)
         let inputEpoch: UInt64
+        let generation: UInt64
         let previousInjection: LastInjectionSnapshot?
     }
 
@@ -142,15 +144,23 @@ enum TextInjector {
             Log.inject.info("typed \(delivered.count, privacy: .public) chars into an unknown app; not erasable")
             return
         }
+        // Input while the insert was landing (a click during a paste's settle, say) means the
+        // focus and caret read now may belong to other text. Recorded without them, so the
+        // unchanged-input rule refuses it rather than trusting a caret that moved (§6.16).
+        let touched = observer.inputEpoch != target.inputEpoch
+        if touched {
+            Log.inject.info("input arrived while the text was landing; recorded as not erasable here")
+        }
         observer.recordTyped(TypedDictation(
             text: delivered,
             processID: processID,
-            element: target.focus.element,
-            window: target.focus.window,
-            caretEnd: caretEnd,
+            element: touched ? nil : target.focus.element,
+            window: touched ? nil : target.focus.window,
+            caretEnd: touched ? nil : caretEnd,
             landedAt: injectionClock.now,
             previousInjection: target.previousInjection,
-            inputEpoch: target.inputEpoch
+            inputEpoch: target.inputEpoch,
+            generation: target.generation
         ))
     }
 
@@ -603,6 +613,8 @@ enum TextInjector {
 protocol TypingObserver: AnyObject {
     /// Bumped by any user key, click, scroll, app or Space switch.
     var inputEpoch: UInt64 { get }
+    /// Bumped by `supersede()`, once per delivery.
+    var deliveryGeneration: UInt64 { get }
     func recordTyped(_ typed: TypedDictation)
     /// A new delivery has begun; the previous record is no longer the last dictation.
     func supersede()

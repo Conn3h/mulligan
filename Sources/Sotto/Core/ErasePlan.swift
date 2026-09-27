@@ -35,6 +35,9 @@ struct TypedDictation: Sendable, Equatable {
     let previousInjection: LastInjectionSnapshot?
     /// The input monitor's epoch before the insert began.
     let inputEpoch: UInt64
+    /// The delivery this insert belongs to. Only the current delivery's landing makes the
+    /// record current again; an older paste settling late must not (§6.16).
+    var generation: UInt64 = 0
 }
 
 /// The target as it reads right now.

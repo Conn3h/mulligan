@@ -20,6 +20,8 @@ final class FakeEraseTarget: EraseTarget {
     var onDelete: (() -> Void)?
     /// Called after each `postBackspaces`, with how many calls have happened.
     var onPost: ((Int) -> Void)?
+    /// When set, `postBackspaces` manages at most this many per call (event creation failed).
+    var postLimit: Int?
 
     private(set) var selects: [CFRange] = []
     private(set) var deletes = 0
@@ -28,7 +30,13 @@ final class FakeEraseTarget: EraseTarget {
 
     func frontmostProcessID() -> pid_t? { frontmost }
 
-    func readBack(utf16Length: Int) -> ReadBack { read }
+    /// The configured read, with the live selection when the field is readable.
+    func readBack(utf16Length: Int) -> ReadBack {
+        if case let .readable(element, window, _, preceding) = read, let currentSelection {
+            return .readable(element: element, window: window, selection: currentSelection, preceding: preceding)
+        }
+        return read
+    }
 
     func select(_ range: CFRange, in element: AXElementID) -> Bool {
         selects.append(range)
@@ -51,11 +59,15 @@ final class FakeEraseTarget: EraseTarget {
 
     func characterCount(in element: AXElementID) -> Int? { count }
 
-    func postBackspaces(_ count: Int) {
-        posted.append(count)
+    func postBackspaces(_ count: Int) -> Int {
+        let managed = min(count, postLimit ?? count)
+        posted.append(managed)
         postedAt.append(ContinuousClock().now)
-        collapseSelection()
+        if managed > 0 {
+            collapseSelection()
+        }
         onPost?(posted.count)
+        return managed
     }
 
     func isKeyDown(_ keyCode: Int64) -> Bool {
@@ -121,7 +133,7 @@ struct DictationEraserTests {
         let typed = TypedDictation(
             text: text ?? spoken, processID: 42, element: readable ? field : nil, window: window,
             caretEnd: readable ? 40 : nil, landedAt: ContinuousClock().now,
-            previousInjection: previous, inputEpoch: eraser.inputEpoch
+            previousInjection: previous, inputEpoch: eraser.inputEpoch, generation: eraser.deliveryGeneration
         )
         eraser.recordTyped(typed)
         return typed
@@ -329,5 +341,112 @@ struct DictationEraserTests {
         #expect(target.posted.isEmpty)
         await settleGate.open()
         #expect(await erase.value == .erased)
+    }
+
+    // MARK: Review fixes (Codex, 2026-09-27)
+
+    @Test func theTargetIsReadAgainAfterWaitingForTheModifier() async {
+        let (eraser, target, _, _) = makeEraser()
+        readsBack(target)
+        _ = typed(readable: true, eraser: eraser)
+        target.eraseKeyDownUntil = ContinuousClock().now + .milliseconds(80)
+        Task { @MainActor in
+            do {
+                try await Task.sleep(for: .milliseconds(20))
+            } catch {
+                return
+            }
+            target.currentSelection = CFRange(location: 12, length: 0)  // the user clicked elsewhere
+        }
+        #expect(await eraser.eraseLast(token: EraseToken()) == .textChanged)
+        #expect(target.selects.isEmpty)
+        #expect(target.posted.isEmpty)
+    }
+
+    @Test func inputDuringTheModifierWaitRefusesTheUnreadablePath() async {
+        let (eraser, target, monitor, _) = makeEraser()
+        _ = typed(readable: false, eraser: eraser)
+        target.eraseKeyDownUntil = ContinuousClock().now + .milliseconds(80)
+        Task { @MainActor in
+            do {
+                try await Task.sleep(for: .milliseconds(20))
+            } catch {
+                return
+            }
+            monitor.fire()
+        }
+        #expect(await eraser.eraseLast(token: EraseToken()) == .inputSince)
+        #expect(target.posted.isEmpty)
+    }
+
+    @Test func aModifierThatStaysDownFailsWithoutPosting() async {
+        let (eraser, target, _, _) = makeEraser()
+        target.eraseKeyDownUntil = ContinuousClock().now + .seconds(30)
+        _ = typed(readable: false, eraser: eraser)
+        #expect(await eraser.eraseLast(token: EraseToken()) == .failed)
+        #expect(target.posted.isEmpty)
+    }
+
+    @Test func theFallbackBackspaceRefusesWhenFocusMoved() async {
+        let (eraser, target, _, _) = makeEraser()
+        let other = AXElementID(element: AXUIElementCreateApplication(103))
+        target.deleteApplies = false
+        readsBack(target)
+        target.onDelete = {
+            target.read = .readable(
+                element: other, window: nil, selection: CFRange(location: 5, length: 0), preceding: nil
+            )
+        }
+        _ = typed(readable: true, eraser: eraser)
+        #expect(await eraser.eraseLast(token: EraseToken()) == .failed)
+        #expect(target.posted.isEmpty)
+    }
+
+    @Test func theFallbackBackspaceRefusesAfterInput() async {
+        let (eraser, target, monitor, _) = makeEraser()
+        target.deleteApplies = false
+        readsBack(target)
+        target.onDelete = { monitor.fire() }
+        _ = typed(readable: true, eraser: eraser)
+        #expect(await eraser.eraseLast(token: EraseToken()) == .failed)
+        #expect(target.posted.isEmpty)
+    }
+
+    @Test func theFallbackBackspaceRefusesWhenAnotherAppIsInFront() async {
+        let (eraser, target, _, _) = makeEraser()
+        target.deleteApplies = false
+        readsBack(target)
+        target.onDelete = { target.frontmost = 9 }
+        _ = typed(readable: true, eraser: eraser)
+        #expect(await eraser.eraseLast(token: EraseToken()) == .failed)
+        #expect(target.posted.isEmpty)
+    }
+
+    @Test func backspacesThatCouldNotBePostedAreNotReportedAsErased() async {
+        let (eraser, target, _, _) = makeEraser()
+        target.postLimit = 4
+        _ = typed(String(repeating: "a", count: 25), readable: false, eraser: eraser)
+        #expect(await eraser.eraseLast(token: EraseToken()) == .interrupted)
+        #expect(target.posted == [4])
+    }
+
+    @Test func noBackspacePostedAtAllIsAFailure() async {
+        let (eraser, target, _, _) = makeEraser()
+        target.postLimit = 0
+        _ = typed(readable: false, eraser: eraser)
+        #expect(await eraser.eraseLast(token: EraseToken()) == .failed)
+    }
+
+    @Test func anOlderLandingAfterANewDeliveryStaysSuperseded() async {
+        let (eraser, target, _, _) = makeEraser()
+        let olderGeneration = eraser.deliveryGeneration
+        eraser.supersede()  // the newer delivery starts
+        eraser.recordTyped(TypedDictation(
+            text: spoken, processID: 42, element: nil, window: window, caretEnd: nil,
+            landedAt: ContinuousClock().now, previousInjection: nil, inputEpoch: eraser.inputEpoch,
+            generation: olderGeneration
+        ))  // the older paste's settle lands late
+        #expect(await eraser.eraseLast(token: EraseToken()) == .notTyped)
+        #expect(target.posted.isEmpty)
     }
 }

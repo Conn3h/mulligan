@@ -59,17 +59,17 @@ final class SystemEraseTarget: EraseTarget {
         TextInjector.characterCount(of: element.element)
     }
 
-    func postBackspaces(_ count: Int) {
+    func postBackspaces(_ count: Int) -> Int {
         guard let source = CGEventSource(stateID: .privateState) else {
             Log.inject.error("erase: could not create a private event source")
-            return
+            return 0
         }
-        for _ in 0..<count {
+        for posted in 0..<count {
             guard let down = CGEvent(keyboardEventSource: source, virtualKey: Self.deleteKeyCode, keyDown: true),
                   let up = CGEvent(keyboardEventSource: source, virtualKey: Self.deleteKeyCode, keyDown: false)
             else {
-                Log.inject.error("erase: could not create backspace events")
-                return
+                Log.inject.error("erase: could not create backspace events after \(posted, privacy: .public)")
+                return posted
             }
             // Push to talk is still physically down: explicit empty flags, so no app reads
             // these as Option-Delete (delete word).
@@ -80,6 +80,7 @@ final class SystemEraseTarget: EraseTarget {
             down.post(tap: .cghidEventTap)
             up.post(tap: .cghidEventTap)
         }
+        return count
     }
 
     func isKeyDown(_ keyCode: Int64) -> Bool {
