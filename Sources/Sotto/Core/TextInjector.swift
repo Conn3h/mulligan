@@ -169,7 +169,8 @@ enum TextInjector {
         ))
     }
 
-    /// The focused element and its window, when readable.
+    /// The focused element and its window, when readable. In a terminal only the window is
+    /// returned (`TerminalApps`).
     static func focusedTarget() -> (element: AXElementID?, window: AXElementID?) {
         var focusedValue: CFTypeRef?
         let focusedError = AXUIElementCopyAttributeValue(
@@ -182,11 +183,18 @@ enum TextInjector {
         let focused = focusedValue as! AXUIElement
         var windowValue: CFTypeRef?
         let windowError = AXUIElementCopyAttributeValue(focused, kAXWindowAttribute as CFString, &windowValue)
-        guard windowError == .success, let windowValue, CFGetTypeID(windowValue) == AXUIElementGetTypeID() else {
+        let window: AXElementID?
+        if windowError == .success, let windowValue, CFGetTypeID(windowValue) == AXUIElementGetTypeID() {
+            window = AXElementID(element: windowValue as! AXUIElement)
+        } else {
             Log.inject.debug("focused element has no readable window (AXError \(windowError.rawValue, privacy: .public))")
-            return (AXElementID(element: focused), nil)
+            window = nil
         }
-        return (AXElementID(element: focused), AXElementID(element: windowValue as! AXUIElement))
+        // A terminal's text is its screen, not the edited line: never offered as readable.
+        if TerminalApps.isTerminal(bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
+            return (nil, window)
+        }
+        return (AXElementID(element: focused), window)
     }
 
     enum Outcome: Sendable, Equatable {

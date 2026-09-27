@@ -1327,6 +1327,13 @@ record is written only when its `pasteCompletionDelay` has passed, which is the 
 the pasteboard restore already rests on: if the target had not taken the paste by then, the
 restore would already have broken it.
 
+**Terminals** (`Core/TerminalApps.swift`, by bundle id: Ghostty, Terminal, iTerm2, WezTerm,
+kitty, Alacritty, Warp) expose their whole screen buffer through Accessibility, not the line
+being edited, so their text can never prove anything: `TextInjector.focusedTarget()` returns
+only the window there, both when recording and when erasing, and erase takes the unverified
+path. Found in acceptance (2026-09-27): Ghostty's text read back as the screen and every erase
+refused.
+
 **Plan** (`ErasePlan.decide`, pure and unit-tested; inputs are the record, `superseded`, the
 current epoch, the frontmost pid, and a `ReadBack` taken just now):
 

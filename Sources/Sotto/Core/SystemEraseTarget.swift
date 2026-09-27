@@ -16,7 +16,7 @@ final class SystemEraseTarget: EraseTarget {
     func readBack(utf16Length: Int) -> ReadBack {
         let focus = TextInjector.focusedTarget()
         guard let element = focus.element else {
-            return .unreadable(window: nil)
+            return .unreadable(window: focus.window)
         }
         guard let selection = TextInjector.selectedRange(of: element.element) else {
             return .unreadable(window: focus.window)
