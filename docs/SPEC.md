@@ -557,7 +557,8 @@ it (below).
      one state the Stop button cannot rescue); the in-flight delivery is left running rather
      than cancelled, so a slow injection is never cut mid-paste.
   6. Clear the session and `holdStartedAt`. `.failed` always shows `.error(message)`.
-     `.tapped` and `.aborted` always show `.idle`. `.released` shows `.idle` too, unless one
+     `.tapped` and `.aborted` show `.idle`, except that an interruption inside `minimumHold`
+     (a tap) still shows `microphoneChangedMessage`. `.released` shows `.idle` too, unless one
      of these applies, in which case it shows `.error(message)` instead (the first that
      applies wins): the finish timed out and the transcript was blank
      (`transcriptionTimedOutMessage`, "Transcription took too long; nothing was typed. Try
@@ -644,6 +645,18 @@ as its own test:
   live utterance as a release: the transcript is delivered, then its message is shown.
 - a message returned by `onFinalTranscript` (the pipeline recorded the text but did not type
   it) is shown as the ending error, then the controller returns to `.idle`.
+
+`Tests/SottoAppTests/DictationOrderTests.swift` adds the **event-order matrix**: every
+external event (hotkey press, release, tap and lost-release recovery, Record, Stop,
+`reloadHotkey()`, `deactivate()`, capture interruption live and stale, snapshot failure, the
+`maxHold` watchdog) in every state (starting at each setup suspension point, listening from
+either source, finishing, delivering, a queued press, the error display, idle), plus the
+two-event sequences where order matters (interruption then release and the reverse, two
+interruptions, an interruption reported during capture start, press/reload/release, a setup
+failure after the release, deactivate during delivery, the watchdog then the late release,
+a finish or delivery timeout then another utterance, a tap then an immediate press). Every
+cell checks: at most one callback per utterance and none after a cancel, idle with no live
+tasks, capture stopped, every engine ended, and no engine unless a press should start one.
 
 Write these tests first; the fake types live in `Tests/SottoAppTests/Fakes.swift`.
 
