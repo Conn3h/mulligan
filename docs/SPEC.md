@@ -263,15 +263,17 @@ between holds the tap could get a stale format, and one failed start poisoned ev
 press until relaunch. The new engine costs a few milliseconds, logged alongside the native
 and engine sample rates.
 
-`start()` also registers for `.AVAudioEngineConfigurationChange`, delivered on a private
-serial queue so a notification posted while `start()` or the handler itself holds the lock
-can never deadlock on it. The engine stops itself on a device connect, disconnect, or a
+`start()` also registers for `.AVAudioEngineConfigurationChange`, before starting the
+engine and keyed by a per-start token (a new engine can reuse an old one's address). The
+observer runs on the posting thread (`queue: nil`) and only enqueues the handler on a
+private serial queue: an observer registered *with* a queue makes the poster wait for it,
+and the handler takes the lock `start()` holds while the engine may be posting. The engine stops itself on a device connect, disconnect, or a
 Bluetooth profile switch; the handler re-installs the tap on the input's new native format
 and restarts the engine, so a change mid-hold costs a moment of audio rather than the rest
 of the utterance. If the restart itself fails, capture tears itself down and calls
 `onInterruption(microphoneChangedMessage)` ("The microphone changed and could not be
 restarted. Try again.") instead of leaving the utterance listening to silence; the
-controller ends the utterance with that message (§6.7).
+controller ends the utterance as a release and then shows that message (§6.7).
 
 **No mutable state is shared with the audio thread.** `start()` builds one immutable
 `Session` value (converter, output format, `onBuffer`, `onLevel`) and the tap closure
@@ -568,9 +570,10 @@ it (below).
 
 **Filler-only transcripts.** Parakeet transcribes a silent hold as a hesitation sound
 ("Mm-.", "Hmm.") that used to get typed. `FillerOnly.matches` (`SottoText`) is true when a
-transcript has at least one word and every word — split on whitespace and hyphens,
-punctuation dropped — is `m`, `mm`, `mmm`… or one of `hmm hm mhm uh um erm uhm er ah eh`
-(stretched forms such as "hmmm" count). Such a transcript is discarded at step 5; any real
+transcript has at least one word and every word — split on whitespace and hyphens, with
+surrounding punctuation trimmed — is `m`, `mm`, `mmm`… or one of `hmm hm mhm uh um erm uhm er ah eh`
+(stretched forms such as "hmmm" count). A word holding a digit or symbol ("42", "50%") is
+content, so "Um, 42." is kept. Such a transcript is discarded at step 5; any real
 word keeps it. Loudness cannot make this decision: on a laptop microphone in a normal room a
 quiet one-word answer peaks no higher on the meter than a silent hold's background noise
 (measured 0.21–0.35 against 0.21–0.27), so a level threshold either misses silent holds or
@@ -580,7 +583,9 @@ swallows short words.
 presses again during "Transcribing…", or a recovered lost release is followed at once by
 its press, §6.4) is **queued**, not dropped: it starts as soon as the terminal task returns
 the controller to idle or error. A release matching the queued press (or the Stop button)
-before then drops it instead.
+before then drops it instead, and so do `reloadHotkey()` and `deactivate()`: the new key's
+monitor never sees the old key's release, so a press queued under it would start recording
+with nothing held.
 
 **Release**: the hotkey's key-up calls `release(onlyFrom: .hotkey)`, which runs
 `terminate(reason: .released)` only if the live session was also started by the hotkey; a
@@ -676,14 +681,17 @@ click away) and never injected. The History panel labels such rows "recorded".
 `process` returns a message for the controller to show as the utterance's ending error
 (§6.7) whenever the text was recorded to history but not typed: `focusMovedMessage`
 ("You switched apps before the text was ready; it is in History.") when the frontmost app
-changed since release, or `insertFailedMessage` ("The text could not be typed; it is in
+changed since release (checked before injection, and again by `TextInjector` right before
+⌘V, since the accessibility verification and settle waits suspend), or `insertFailedMessage` ("The text could not be typed; it is in
 History.") when `TextInjector.insert` itself reports that neither strategy delivered the
 text. Either way the sound stays silent, but the run is still recorded and returns `nil`
 otherwise.
 
 Log the count of corrections applied and the character count injected or recorded.
 
-`TextInjector.insert` tries two strategies in order, returning whether the text landed:
+`TextInjector.insert(_:targetProcessID:)` tries two strategies in order and returns an
+`Outcome`: `.landed`, `.failed`, or `.focusMoved` (another app came to the front before the
+paste, so nothing was typed):
 
 1. **Accessibility, verified.** Get the system-wide focused element; require
    `kAXSelectedTextAttribute` to be settable; read `kAXSelectedTextRangeAttribute` and
@@ -691,14 +699,14 @@ Log the count of corrections applied and the character count injected or recorde
    write can report success and still drop the text (Electron, Chrome, most terminals do),
    and some apps (Firefox) apply it at once but report the new selection only 10–20 ms
    later, so **poll for up to 150 ms** rather than checking once. `ExpectedWrite` decides
-   what counts: the selection changed and its end now lies past where the write started but
-   no further than twice the inserted length (plus a tolerance of 2 UTF-16 units or a tenth
-   of the insertion), or the character count changed by the inserted length less what it
-   replaced, within the inserted length plus that tolerance. The wide band is deliberate:
-   editors that convert on insert (markdown, emoji shortcodes, autocorrect) change the
-   landed length, and treating their write as failed pastes it a second time. A backwards
-   move or a far jump (a terminal printing a screenful) is someone else's change and does
-   not count. No evidence inside the timeout falls back to the pasteboard.
+   what counts: the selection changed and its end now lies between half and twice the
+   inserted length past where the write started (plus a tolerance of 2 UTF-16 units or a
+   tenth of the insertion), or a field the write should grow grew by between half and twice
+   the inserted length less what it replaced (a field it should shrink must land within the
+   tolerance). The wide band is deliberate: editors that convert on insert (markdown, emoji
+   shortcodes, autocorrect) change the landed length, and treating their write as failed
+   pastes it a second time. Backwards moves, small changes and far jumps (a terminal
+   printing a screenful) are someone else's and do not count. No evidence inside the timeout falls back to the pasteboard.
 2. **Pasteboard + ⌘V.** Add one leading space to `text` only when the previous injection
    was Sotto's own, into the same frontmost application, within eight seconds, and did not
    end in whitespace; otherwise paste `text` unchanged (the paste path cannot read the
