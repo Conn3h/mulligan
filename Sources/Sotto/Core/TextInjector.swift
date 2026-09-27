@@ -29,6 +29,12 @@ enum TextInjector {
     /// contents instead of the text.
     private static let pasteCompletionDelay: Duration = .milliseconds(500)
 
+    /// How long an accessibility write may take to show up in the selection or length before
+    /// it counts as not landed. Firefox needs a few milliseconds; the paste fallback that
+    /// follows a false "not landed" duplicates the text.
+    private static let accessibilityVerifyTimeout: Duration = .milliseconds(150)
+    private static let accessibilityVerifyPollInterval: Duration = .milliseconds(10)
+
     private static var pendingRestore: PendingRestore?
     private static var restoreTask: Task<Void, Never>?
 
@@ -52,7 +58,7 @@ enum TextInjector {
             Log.inject.info("nothing to insert")
             return
         }
-        if let reason = insertViaAccessibility(text) {
+        if let reason = await insertViaAccessibility(text) {
             Log.inject.info(
                 "accessibility path not trusted (\(reason, privacy: .public)); pasting \(text.count, privacy: .public) chars"
             )
@@ -71,11 +77,13 @@ enum TextInjector {
 
     // MARK: Accessibility
 
-    /// Nil when the write was verified by caret movement; otherwise the reason to fall back.
-    /// "Moved" rather than "moved by exactly the text length": autocorrect and newline
-    /// normalisation shift the caret by other amounts, and falling back after a write that
-    /// did land would paste the text twice.
-    private static func insertViaAccessibility(_ text: String) -> String? {
+    /// Nil when the write was verified by caret movement or a changed character count;
+    /// otherwise the reason to fall back. "Moved" rather than "moved by exactly the text
+    /// length": autocorrect and newline normalisation shift the caret by other amounts, and
+    /// falling back after a write that did land would paste the text twice. Some apps
+    /// (Firefox) apply the write at once but report the new selection only a moment later,
+    /// so the check polls for `accessibilityVerifyTimeout` before giving up.
+    private static func insertViaAccessibility(_ text: String) async -> String? {
         let systemWide = AXUIElementCreateSystemWide()
         var focusedValue: CFTypeRef?
         let focusedError = AXUIElementCopyAttributeValue(
@@ -100,20 +108,19 @@ enum TextInjector {
         guard let before = selectedRange(of: focused) else {
             return "selection range unreadable before the write"
         }
+        let countBefore = characterCount(of: focused)
         let leadingSpace = needsLeadingSpace(in: focused, before: before)
         let inserted = leadingSpace ? " " + text : text
         let writeError = AXUIElementSetAttributeValue(focused, kAXSelectedTextAttribute as CFString, inserted as CFString)
         guard writeError == .success else {
             return "write failed (AXError \(writeError.rawValue))"
         }
-        guard let after = selectedRange(of: focused) else {
-            return "selection range unreadable after the write"
-        }
-        guard after.location != before.location || after.length != before.length else {
-            return "write reported success but the selection did not move"
+        let started = injectionClock.now
+        guard let evidence = await awaitWriteEvidence(on: focused, before: before, countBefore: countBefore) else {
+            return "write reported success but neither the selection nor the length changed within \(accessibilityVerifyTimeout)"
         }
         Log.inject.info(
-            "inserted \(inserted.count, privacy: .public) chars via accessibility (leading space: \(leadingSpace, privacy: .public)); selection \(before.location, privacy: .public)+\(before.length, privacy: .public) -> \(after.location, privacy: .public)+\(after.length, privacy: .public)"
+            "inserted \(inserted.count, privacy: .public) chars via accessibility (leading space: \(leadingSpace, privacy: .public)); verified by \(evidence, privacy: .public) after \(injectionClock.now - started, privacy: .public)"
         )
         lastInjection = LastInjection(
             bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
@@ -121,6 +128,38 @@ enum TextInjector {
             endedInWhitespace: inserted.last?.isWhitespace ?? false
         )
         return nil
+    }
+
+    /// Polls for proof that an accessibility write landed: the selection moved, or the
+    /// field's character count changed. Returns a description of the evidence, or nil when
+    /// neither appeared before `accessibilityVerifyTimeout`.
+    private static func awaitWriteEvidence(
+        on element: AXUIElement, before: CFRange, countBefore: Int?
+    ) async -> String? {
+        let deadline = injectionClock.now + accessibilityVerifyTimeout
+        while true {
+            if let after = selectedRange(of: element),
+               after.location != before.location || after.length != before.length {
+                return "selection \(before.location)+\(before.length) -> \(after.location)+\(after.length)"
+            }
+            if let countBefore, let countAfter = characterCount(of: element), countAfter != countBefore {
+                return "length \(countBefore) -> \(countAfter)"
+            }
+            guard injectionClock.now < deadline else {
+                return nil
+            }
+            await wait(accessibilityVerifyPollInterval)
+        }
+    }
+
+    private static func characterCount(of element: AXUIElement) -> Int? {
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(element, kAXNumberOfCharactersAttribute as CFString, &value)
+        guard error == .success, let count = value as? Int else {
+            Log.inject.debug("character count unavailable (AXError \(error.rawValue, privacy: .public))")
+            return nil
+        }
+        return count
     }
 
     private static func selectedRange(of element: AXUIElement) -> CFRange? {
