@@ -41,3 +41,17 @@ logs.
    `TextInjector`. It relies on AX and real events, so it is covered in hands-on acceptance.
 4. **P3.** A record that had an element but now reads as unreadable went to the unverified
    path. Fixed in 41e3f44 (Codex finding 4).
+
+## Codex, rounds two and three (on the fixes)
+
+Round two found six of the eight fixes closed and three gaps in the fixes themselves:
+- **A (P1).** Without a running input monitor, a delayed paste caret was still trusted.
+  Fixed in bd22863: `TypedDictation.landingIsTrusted` requires the monitor.
+- **B (P1).** The generation was sampled at insertion, not at delivery start. Fixed in
+  bd22863: `supersede()` returns the generation, and the pipeline passes it to the insert.
+- **C (P1).** Pressing the erase modifier again was not seen before posting. Fixed in
+  bd22863 for each burst, and completed in 3820d7f: the fallback backspace checks the
+  modifier after its last AX read.
+
+Round three confirmed A and B closed and no new P0 or P1 issues. It flagged the check order
+in the fallback (C), which 3820d7f closes.
