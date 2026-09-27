@@ -11,6 +11,8 @@ final class FakeEraseTarget: EraseTarget {
     var frontmost: pid_t? = 42
     var read: ReadBack = .unreadable(window: nil)
     var selectSucceeds = true
+    /// Whether the field says its selection can be set at all (AXUIElementIsAttributeSettable).
+    var selectSettable = true
     /// The select call reports failure but the app applies it anyway, a moment later (the
     /// ChatGPT app, 2026-09-27): the selection shows up on the next `selection(in:)` query.
     var selectLandsLate = false
@@ -61,6 +63,8 @@ final class FakeEraseTarget: EraseTarget {
         }
         return read
     }
+
+    func canSelect(in element: AXElementID) -> Bool { selectSettable }
 
     func select(_ range: CFRange, in element: AXElementID) -> Bool {
         selects.append(range)
@@ -302,16 +306,45 @@ struct DictationEraserTests {
         #expect(target.posted == [1])
     }
 
-    /// A field that will not select falls back to checked backspaces; one that does not show
-    /// them landing (this static fake) stops after the first burst.
-    @Test func checkedBackspacesThatDoNotShowUpStopAfterOneBurst() async {
+    /// A field that says it can select but never applies the selection may still apply it
+    /// later, mid-run, where a backspace would delete it and more: refuse (Codex, round 4).
+    @Test func aSelectableFieldThatNeverTakesTheSelectionRefuses() async {
         let (eraser, target, _, _) = makeEraser()
         target.selectSucceeds = false
+        readsBack(target)
+        _ = typed(readable: true, eraser: eraser)
+        #expect(await eraser.eraseLast(token: EraseToken()) == .failed)
+        #expect(target.deletes == 0)
+        #expect(target.posted.isEmpty)
+    }
+
+    /// A field that cannot select falls back to checked backspaces; one that does not show
+    /// them landing (this static fake) stops after the first.
+    @Test func checkedBackspacesThatDoNotShowUpStopAfterOne() async {
+        let (eraser, target, _, _) = makeEraser()
+        target.selectSettable = false
         readsBack(target)
         _ = typed(readable: true, eraser: eraser)
         #expect(await eraser.eraseLast(token: EraseToken()) == .interrupted)
         #expect(target.deletes == 0)
         #expect(target.posted == [1])
+    }
+
+    /// Text shifts during the late-selection wait: the landed range now covers other text.
+    @Test func aLateSelectionOverShiftedTextIsNotDeleted() async {
+        let (eraser, target, _, _) = makeEraser()
+        unselectableField(eraser, target)
+        target.selectSettable = true
+        target.selectLandsLate = true
+        // Reads: plan, re-plan, then the check right before the delete.
+        target.onReadBack = { reads in
+            if reads == 3, let text = target.field {
+                target.field = "X" + text
+            }
+        }
+        #expect(await eraser.eraseLast(token: EraseToken()) == .failed)
+        #expect(target.deletes == 0)
+        #expect(target.field == "X" + older + latest)
     }
 
     @Test func deleteRangeNeverFallsBackToCountedBackspaces() async {
@@ -578,6 +611,7 @@ struct DictationEraserTests {
         target.field = older + latest
         target.fieldElement = field
         target.fieldWindow = window
+        target.selectSettable = false
         target.selectSucceeds = false
         let end = (older + latest).utf16.count
         target.currentSelection = CFRange(location: end, length: 0)
@@ -593,13 +627,15 @@ struct DictationEraserTests {
         unselectableField(eraser, target)
         #expect(await eraser.eraseLast(token: EraseToken()) == .erased)
         #expect(target.field == older)
-        // One probe backspace first, then bursts.
-        #expect(target.posted == [1, 10, 10])
+        // One key at a time, each proven before and verified after; no selection requested.
+        #expect(target.posted == Array(repeating: 1, count: latest.count))
+        #expect(target.selects.isEmpty)
     }
 
     @Test func aSelectionThatLandsAfterTheCallIsUsedAsASelection() async {
         let (eraser, target, _, _) = makeEraser()
         unselectableField(eraser, target)
+        target.selectSettable = true
         target.selectLandsLate = true
         #expect(await eraser.eraseLast(token: EraseToken()) == .erased)
         #expect(target.field == older)

@@ -26,6 +26,16 @@ final class SystemEraseTarget: EraseTarget {
         return .readable(element: element, window: focus.window, selection: selection, preceding: preceding)
     }
 
+    func canSelect(in element: AXElementID) -> Bool {
+        var settable: DarwinBoolean = false
+        let error = AXUIElementIsAttributeSettable(element.element, kAXSelectedTextRangeAttribute as CFString, &settable)
+        guard error == .success else {
+            Log.inject.info("erase: selection settability unknown (AXError \(error.rawValue, privacy: .public)); treating as settable")
+            return true
+        }
+        return settable.boolValue
+    }
+
     func select(_ range: CFRange, in element: AXElementID) -> Bool {
         var wanted = range
         guard let value = AXValueCreate(.cfRange, &wanted) else {

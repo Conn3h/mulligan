@@ -19,6 +19,8 @@ protocol EraseTarget: AnyObject {
     func frontmostProcessID() -> pid_t?
     /// The focused field now, reading `utf16Length` units of text before the selection's end.
     func readBack(utf16Length: Int) -> ReadBack
+    /// Whether the field says its selection can be set at all.
+    func canSelect(in element: AXElementID) -> Bool
     /// Sets the selection; true only when it reads back exactly as set.
     func select(_ range: CFRange, in element: AXElementID) -> Bool
     /// Writes "" over the selection. The caller verifies whether it took.
@@ -190,16 +192,27 @@ final class DictationEraser: TypingObserver {
             return .failed
         }
         let epoch = inputEpoch
-        guard await selectAllowingLateLanding(range, in: element) else {
-            Log.inject.info(
-                "erase: selection \(range.location, privacy: .public)+\(range.length, privacy: .public) did not take; using checked backspaces"
-            )
+        // A field that cannot select at all gets checked backspaces, with no selection request
+        // left pending that could land in the middle of them.
+        guard target.canSelect(in: element) else {
+            Log.inject.info("erase: the field's selection cannot be set; using checked backspaces")
             return await checkedBackspaces(from: range.location, element: element, record: record, token: token, epoch: epoch)
         }
-        let countBefore = target.characterCount(in: element)
-        guard !token.isRevoked else {
+        // One that can but does not apply it, even late, may apply it at any later moment,
+        // where a backspace would delete it and more: refuse.
+        guard await selectAllowingLateLanding(range, in: element) else {
+            Log.inject.info(
+                "erase: selection \(range.location, privacy: .public)+\(range.length, privacy: .public) did not take; refusing"
+            )
             return .failed
         }
+        // The selection may have landed late, after text moved: it must still cover exactly
+        // Sotto's text, in the same field, with nothing touched, before anything is deleted.
+        guard !token.isRevoked, isStillOurSelection(range, element: element, record: record, epoch: epoch) else {
+            Log.inject.info("erase: the selection no longer covers exactly the dictation; refusing")
+            return .failed
+        }
+        let countBefore = target.characterCount(in: element)
         if !target.deleteSelection(in: element) {
             Log.inject.info("erase: AX delete reported an error; checking whether it took")
         }
@@ -256,8 +269,7 @@ final class DictationEraser: TypingObserver {
         return true
     }
 
-    /// A field that reads but will not take a selection (the ChatGPT app): backspaces in
-    /// bursts, each burst proven first. Before every burst the focused element must be ours,
+    /// A field that reads but cannot select: backspaces one at a time, each proven first. Before every burst the focused element must be ours,
     /// the caret collapsed exactly where the remaining dictation ends, the text before it
     /// exactly that remainder, with no input, no app change and no erase modifier; after each
     /// burst the field must show it landed. Anything else stops the run.
@@ -266,10 +278,9 @@ final class DictationEraser: TypingObserver {
     ) async -> EraseOutcome {
         var remaining = record.text
         var posted = 0
-        // The first burst is a single backspace: if the app deletes more than one character
-        // for it (a selection that landed after all, or a word delete), the check after it
-        // stops the run with only the dictation's own last characters gone.
-        var burstSize = 1
+        // One backspace at a time, each proven before and verified after: if the app ever
+        // deletes more than one character for one (a word delete, a selection from elsewhere),
+        // the check after it stops the run with only the dictation's own last characters gone.
         while !remaining.isEmpty {
             guard !token.isRevoked, inputEpoch == epoch, target.frontmostProcessID() == record.processID,
                   caretFollows(remaining, from: start, in: element), !eraseModifierIsDown()
@@ -279,8 +290,7 @@ final class DictationEraser: TypingObserver {
                 )
                 return posted == 0 ? .failed : .interrupted
             }
-            let burst = min(burstSize, remaining.count)
-            burstSize = Self.chunkSize
+            let burst = 1
             let managed = target.postBackspaces(burst)
             posted += managed
             remaining = String(remaining.dropLast(managed))
