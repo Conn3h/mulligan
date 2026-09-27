@@ -1,0 +1,21 @@
+Sources/SottoText/FillerOnly.swift
+  s_167e1562cc51b5::t_dfda75555a4651 10-11,15,25-27
+Tests/SottoTextTests/FillerOnlyTests.swift
+  s_167e1562cc51b5::t_a6f9f66c3225df 13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "7c56bd30185918ce9dd602a7b8473844c2946d45",
+  "prompts": {},
+  "sessions": {
+    "s_167e1562cc51b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d9572c79-e728-4fc6-a74b-433213ba5609",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
