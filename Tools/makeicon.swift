@@ -1,9 +1,11 @@
 // Renders Resources/AppIcon.iconset from code, so the icon is regenerable and reviewable.
 // Run: swift Tools/makeicon.swift && iconutil -c icns Resources/AppIcon.iconset -o Resources/AppIcon.icns
 //
-// The mark: Mulligan's level meter at rest, a calm five-bar waveform in off-white on the
-// app's charcoal ink, with the single coral recording lamp in the top corner. Flat fills
-// and one hairline highlight; the palette is the app's own design tokens.
+// The mark: the tee shot. A coral ball (the app's recording lamp) sits on an off-white tee,
+// with two sound arcs coming off it, on the app's charcoal ink. A mulligan is a free second
+// shot; this is the shot. Flat fills and one hairline highlight; the palette is the app's own
+// design tokens. Geometry is in a 100-unit box, the plate spanning 10...90, y down, as in the
+// design canvas; `point` maps it onto the bitmap.
 import AppKit
 
 let ink = NSColor(srgbRed: 0x1C / 255, green: 0x1B / 255, blue: 0x18 / 255, alpha: 1)
@@ -42,27 +44,57 @@ func draw(canvas s: CGFloat, pixels: Int) {
     paper.withAlphaComponent(0.12).setStroke()
     bevel.stroke()
 
-    // The waveform at rest, centred on the plate's horizontal axis, sitting a touch low
-    // so the lamp has room above.
-    let heights: [CGFloat] = pixels >= 64 ? [0.26, 0.46, 0.66, 0.42, 0.30] : [0.34, 0.66, 0.38]
-    let barWidth = plate.width * (pixels >= 64 ? 0.082 : 0.13)
-    let gap = plate.width * (pixels >= 64 ? 0.062 : 0.09)
-    let total = CGFloat(heights.count) * barWidth + CGFloat(heights.count - 1) * gap
-    var x = plate.midX - total / 2
-    let axis = plate.midY - plate.height * 0.05
-    paper.setFill()
-    for fraction in heights {
-        let height = plate.height * fraction
-        let bar = NSRect(x: x, y: axis - height / 2, width: barWidth, height: height)
-        NSBezierPath(roundedRect: bar, xRadius: barWidth / 2, yRadius: barWidth / 2).fill()
-        x += barWidth + gap
+    // Canvas units (100 wide, y down) to bitmap points (y up).
+    func point(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
+        NSPoint(x: x / 100 * s, y: s - y / 100 * s)
+    }
+    func length(_ units: CGFloat) -> CGFloat {
+        units / 100 * s
+    }
+    let small = pixels < 64
+
+    // The ground: a faint line under the tee. Lost below 64 px, so left out there.
+    if !small {
+        let ground = NSBezierPath()
+        ground.move(to: point(26, 78))
+        ground.line(to: point(74, 78))
+        ground.lineWidth = length(1.5)
+        ground.lineCapStyle = .round
+        paper.withAlphaComponent(0.3).setStroke()
+        ground.stroke()
     }
 
-    // The recording lamp.
-    let lampRadius = plate.width * (pixels >= 64 ? 0.048 : 0.075)
-    let lampCentre = NSPoint(x: plate.maxX - plate.width * 0.21, y: plate.maxY - plate.height * 0.21)
+    // The tee: a cup under the ball and a stem.
+    paper.setFill()
+    let cup = NSBezierPath()
+    cup.move(to: point(34, 58))
+    cup.line(to: point(54, 58))
+    cup.line(to: point(47.5, 63))
+    cup.line(to: point(40.5, 63))
+    cup.close()
+    cup.fill()
+    let stemWidth = length(3.6)
+    let stemTop = point(42.2, 62)
+    let stem = NSRect(x: stemTop.x, y: stemTop.y - length(16), width: stemWidth, height: length(16))
+    NSBezierPath(roundedRect: stem, xRadius: stemWidth / 2, yRadius: stemWidth / 2).fill()
+
+    // The sound arcs, centred on the ball, 40 degrees either side of horizontal. Small sizes
+    // keep only the inner arc, drawn heavier so it survives the downscale.
+    let centre = point(44, 46)
+    let arcs: [(radius: CGFloat, alpha: CGFloat)] = small ? [(17, 1)] : [(17, 1), (24, 0.55)]
+    for arc in arcs {
+        let path = NSBezierPath()
+        path.appendArc(withCenter: centre, radius: length(arc.radius), startAngle: -40, endAngle: 40)
+        path.lineWidth = length(small ? 5 : 3)
+        path.lineCapStyle = .round
+        paper.withAlphaComponent(arc.alpha).setStroke()
+        path.stroke()
+    }
+
+    // The ball: the recording lamp.
+    let ballRadius = length(11)
     coral.setFill()
-    NSBezierPath(ovalIn: NSRect(x: lampCentre.x - lampRadius, y: lampCentre.y - lampRadius, width: 2 * lampRadius, height: 2 * lampRadius)).fill()
+    NSBezierPath(ovalIn: NSRect(x: centre.x - ballRadius, y: centre.y - ballRadius, width: 2 * ballRadius, height: 2 * ballRadius)).fill()
 }
 
 func render(pixels: Int) -> Data {

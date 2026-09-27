@@ -1,5 +1,7 @@
 # Mulligan
 
+*(formerly Sotto)*
+
 > **mulligan** *(noun, golf)* — a free second shot, taken as if the first never happened.
 
 Hold a key, talk, let go: Mulligan writes it where you were typing. Said it wrong? Tap one more

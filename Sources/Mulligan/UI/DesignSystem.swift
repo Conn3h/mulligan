@@ -26,17 +26,18 @@ enum DS {}
 
 extension DS {
     /// Flat, appearance-adaptive fills and ink colours. Light appearance is warm off-white
-    /// panels on a slightly darker warm ground with near-black ink; dark appearance is
-    /// near-black panels on true black with off-white ink. Every colour resolves per the
+    /// panels on a slightly darker warm ground with near-black ink; dark appearance is warm
+    /// charcoal panels one clear step above a near-black ground, with off-white ink (the
+    /// design lift, spec v1.5, raised the dark values so panels no longer vanish into black). Every colour resolves per the
     /// current `NSAppearance`, so a single value works in both.
     enum Color {
         /// The window/screen backdrop behind every panel.
-        static let ground = adaptiveColor("DS.ground", light: 0xE9E5DD, dark: 0x000000)
+        static let ground = adaptiveColor("DS.ground", light: 0xE9E5DD, dark: 0x0E0D0C)
         /// The standard surface fill for cards, rows and controls.
-        static let panel = adaptiveColor("DS.panel", light: 0xF6F3EC, dark: 0x151412)
+        static let panel = adaptiveColor("DS.panel", light: 0xF6F3EC, dark: 0x1A1917)
         /// A slightly lighter surface for content that should read as sitting above
         /// `panel`, e.g. a hovered row or an inline field.
-        static let panelRaised = adaptiveColor("DS.panelRaised", light: 0xFCFAF4, dark: 0x1E1C19)
+        static let panelRaised = adaptiveColor("DS.panelRaised", light: 0xFCFAF4, dark: 0x262420)
 
         /// Primary text and iconography.
         static let ink = adaptiveColor("DS.ink", light: 0x1C1B18, dark: 0xEDEAE3)
@@ -47,7 +48,7 @@ extension DS {
 
         /// Low-contrast borders that separate panels without drawing attention to
         /// themselves.
-        static let hairline = adaptiveColor("DS.hairline", light: 0xDAD5C9, dark: 0x2A2824)
+        static let hairline = adaptiveColor("DS.hairline", light: 0xDAD5C9, dark: 0x2E2C27)
 
         /// "Recording", and nothing else. See rule 1 on `DS`.
         static let accent = adaptiveColor("DS.accent", light: 0xD8584A, dark: 0xE06A5C)
@@ -331,6 +332,51 @@ extension DS {
         /// `Font` carries no tracking of its own, so this pairs with it via
         /// `.tracking(DS.Metric.eyebrowTracking)` at each call site.
         static let eyebrowTracking: CGFloat = 0.9
+
+        // Added by the design lift (spec v1.5): the main window's status header, which sits
+        // in the hidden title bar beside the window controls.
+        /// Height of the status header: the title bar band, so its controls sit on the same
+        /// centre line as the close, minimise and zoom buttons (measured on macOS 26).
+        static let headerHeight: CGFloat = 32
+        /// Space between the header band and the panel below it.
+        static let headerGap: CGFloat = 10
+        /// Leading room left for the close, minimise and zoom buttons.
+        static let windowControlsClearance: CGFloat = 78
+        /// Diameter of the header's status dot.
+        static let statusDotSize: CGFloat = 8
+        /// Side of a square icon button: the header's Record and Settings buttons.
+        static let iconButtonSize: CGFloat = 28
+        /// Side of a History row's copy and delete buttons.
+        static let rowButtonSize: CGFloat = 24
+        /// Width of the Settings window's grouped form.
+        static let settingsWidth: CGFloat = 480
+        /// Width of the first-run welcome sheet.
+        static let welcomeWidth: CGFloat = 440
+        /// Size of the tee-shot glyph in the welcome sheet.
+        static let welcomeGlyphHeight: CGFloat = 72
+    }
+}
+
+// MARK: - Tee shot
+
+extension DS {
+    /// The tee-shot mark (spec v1.5): a ball on a tee with sound arcs coming off it. The app
+    /// icon draws it, and the HUD uses it as its lamp and level meter: the ball is the
+    /// recording lamp, the arcs light outward with level in the meter colours. Geometry is
+    /// in a `width` x `height` box and scales with it.
+    enum TeeShot {
+        static let width: CGFloat = 46
+        static let height: CGFloat = 60
+        static let ballCentre = CGPoint(x: 16, y: 28)
+        static let ballRadius: CGFloat = 8
+        /// The tee's cup: top-left, top-right, bottom-right, bottom-left.
+        static let cup: [CGPoint] = [CGPoint(x: 9, y: 37), CGPoint(x: 23, y: 37), CGPoint(x: 19.5, y: 41), CGPoint(x: 12.5, y: 41)]
+        static let stem = CGRect(x: 14.6, y: 40, width: 2.8, height: 13)
+        /// Arc radii from the ball's centre, inner to outer. The meter lights them in order.
+        static let arcRadii: [CGFloat] = [12, 17, 22, 27, 32]
+        /// Half the angle each arc spans, either side of horizontal.
+        static let arcHalfAngleDegrees: Double = 40
+        static let arcLineWidth: CGFloat = 2.2
     }
 }
 

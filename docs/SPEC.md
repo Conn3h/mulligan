@@ -20,6 +20,10 @@ already stored keeps the old name so nothing is lost: the bundle id and log subs
 `com.conn3h.sotto` (the Accessibility and Microphone grants and `UserDefaults` hang on it),
 `~/Library/Application Support/Sotto/`, and the `sotto-notary` keychain profile.
 `make install` removes a leftover `/Applications/Sotto.app`, which shares the bundle id.
+v1.5 (2026-09-28) is the design lift (§6.14): a slim status header replaces the transport
+strip, History is grouped by day, Settings is a native grouped form, the HUD's meter becomes
+the tee-shot mark, the Dictionary shows how often each entry fires, a first-run welcome
+teaches the two keys, and the app icon is the tee shot.
 
 ---
 
@@ -1144,11 +1148,20 @@ share `Support/AppSupportDirectory.swift` for the directory (as built).
 **Design direction: "quiet instrument".** Mulligan is a tool you glance at, not a toy. Matte
 surfaces, one accent, generous whitespace, tabular numerals for timings. In light
 appearance: warm off-white panels on a slightly darker ground with ink-black text. In dark
-appearance: near-black panels on true black with off-white text. Two rules that are not
-negotiable: **the accent (a muted coral red) means "recording" and is used for nothing
-else**, and **level meters use a restrained green-to-amber scale that appears nowhere else
-in the chrome**. No gradients, no glow, no blur-heavy glass except the HUD's material
-background, no decorative skeuomorphism. Depth comes from flat fills and hairline borders.
+appearance: warm charcoal panels one clear step above a near-black ground, with off-white
+text (v1.5 raised these from near-black on true black, where panels vanished). Two rules
+that are not negotiable: **the accent (a muted coral red) means "recording" and is used for
+nothing else**, and **level meters use a restrained green-to-amber scale that appears
+nowhere else in the chrome**. No gradients, no glow, no blur-heavy glass except the HUD's
+material background, no decorative skeuomorphism. Depth comes from flat fills and hairline
+borders.
+
+**The mark: the tee shot.** A ball on a tee with sound arcs coming off it (a mulligan is a
+free second shot). `DS.TeeShot` holds its geometry. The app icon (`Tools/makeicon.swift`,
+`make icon`) draws it with a coral ball; below 64 px it drops the ground line and the outer
+arc. In the HUD it is the lamp and the meter: the ball is coral only while listening, and
+five arcs light from the inside out with level, each in its place on the meter scale.
+Elsewhere in the chrome the ball is neutral, since coral means recording.
 
 `UI/DesignSystem.swift` defines every token under `enum DS`: `Color` (ground, panel,
 panelRaised, ink, inkSecondary, inkTertiary, hairline, accent, meterLow, meterHigh,
@@ -1175,40 +1188,58 @@ first screen), `hudBottomOffset` above the visible frame's bottom. `present()` f
 `DS.Motion.hud` and is a no-op when already fully visible (state changes mid-utterance must
 not flicker); `dismiss()` fades out and orders out on completion. Shown whenever
 `controller.state.showsHUD` is true (so errors are visible for their display duration).
-Content: a `hudBarCount`-bar level meter (each bar with a fixed phase offset so the group
-ripples rather than pumps; bars rest at `hudBarFloor` when inactive; animation phase lives
-in a plain reference type the view holds, never in `@State` mutated from a draw closure)
-and the live transcript, two lines, head-truncated, or "Preparing…" while `.starting`,
-"Listening…" while `.listening` with an empty transcript, "Erasing…" while `.erasing`
-(§6.16), "Transcribing…" while
-`.finishing` with an empty transcript, or the error message in the accent colour. Hosted
-with `NSHostingView`.
+Content: the tee-shot mark as lamp and meter (above; the level is eased in a plain
+reference type the view holds, never in `@State` mutated from a draw closure, and the
+`TimelineView` pauses when inactive) and the live transcript, two lines, head-truncated, or
+"Preparing…" while `.starting`, "Listening…" while `.listening` with an empty transcript,
+"Erasing…" while `.erasing` (§6.16), "Transcribing…" while `.finishing` with an empty
+transcript, or the error message in the accent colour. **Redo hint:** while listening with
+an empty transcript, if `DictationEraser.hasErasable` and `Settings.redoHintsRemaining > 0`
+and the erase key is on (`RedoHint.shows`), the second line reads "Tap ⟨erase key⟩ to redo
+the last one". The decision is made once as listening starts; each hold that shows it uses
+one of `Settings.redoHintBudget` (10), and an erase sets the count to zero. Hosted with
+`NSHostingView`.
 
 **Main window** — `UI/MainWindow.swift`, single `Window` scene (not a `WindowGroup`),
-default and minimum sizes from `DS.Metric`. Top: a transport strip with Record/Stop
-(`startButtonRecording` / `stopButtonRecording`), a recording lamp in the accent colour, a
-live level meter, and an elapsed counter in readout digits driven by
-`controller.holdStartedAt`. A caption under the transport says "Recordings started here are
-saved to History, not typed." Below: a two-tab area, **History** and **Dictionary**.
-History (`UI/HistoryPanel.swift`): search field, newest first, each row showing engine,
-source ("typed" / "recorded"), process time, time of day, the text (selectable), correction
-badges when any fired (strikethrough "heard" → "written" ×count), a Copy button with a
-`copiedFeedbackSeconds` "Copied" state, and a hover-only delete without confirmation; a
-footer with the count and a "Delete all" that confirms. Dictionary
-(`UI/DictionaryPanel.swift`): search, an add row with a kind toggle (term / correction),
-inline edit, enable toggle, delete, and the `DictionaryWarning` messages shown inline when
-adding. File menu: "Reveal Dictionary File" and "Reload Dictionary".
+default and minimum sizes from `DS.Metric`, hidden title bar. A **status header** shares the
+title bar band with the window controls (`headerHeight`, `windowControlsClearance`): a
+status dot (coral only while active) and word ("Ready", "Listening", or for
+`statusHoldSeconds` after an utterance that produced a run, "Typed ⟨time⟩" / "Saved
+⟨time⟩"), the key hint "hold ⟨key⟩ to talk · tap ⟨erase key⟩ to redo" in keycaps (the
+second half only when erase is on), then the History / Dictionary switch, a small Record
+button (`startButtonRecording` / `stopButtonRecording`; filled coral while recording; its
+help says recordings started here are saved to History, not typed) and a Settings button.
+Below, History or Dictionary sits on one `panel` surface. History
+(`UI/HistoryPanel.swift`): search and "Copy last" (⌥⌘C), runs grouped by day
+(`HistoryDays`: "Today", "Yesterday", then "Friday 25 September", with the year when it
+differs) under sticky headers carrying the day's dictation and word counts; each row shows
+the time of day, the text (selectable) and correction badges when any fired (strikethrough
+"heard" → "written" ×count), with an always-visible Copy button (`copiedFeedbackSeconds`
+"Copied" state) and a hover-only delete without confirmation; engine, source and process
+time are in the row's tooltip. A footer with the total dictation and word counts and a
+"Delete all…" that confirms. Dictionary (`UI/DictionaryPanel.swift`): search and an "Add"
+button that opens the add form (kind toggle term / correction, fields, Cancel / Add;
+representability issues and `DictionaryWarning` messages appear only once something is
+typed), then entries with inline edit, enable toggle and delete on hover, and otherwise how
+many times each has fired across History (`CorrectionUsage`, shown only when above zero).
+File menu: "Reveal Dictionary File" and "Reload Dictionary".
 
-**Settings** — `UI/SettingsWindow.swift`, the standard `Settings` scene (⌘,). Sections:
-Push to talk (segmented choice of the three keys; changing it calls
-`controller.reloadHotkey()`), Erase (segmented choice over the `EraseKey` cases that do not conflict with the push-to-talk
-key, §6.16; changing it
-also calls `controller.reloadHotkey()`; caption "Hold ⟨key⟩ and press ⟨erase key⟩ to remove
-your last dictation and say it again.", or "Erasing is off." when off), Cleanup (toggle; when on, a Smart cleanup toggle disabled with
-the `unavailableReason` shown when the Foundation Model is unavailable), Sound (toggle), and
-a Permissions section showing Accessibility and Microphone status with "Open System
-Settings" buttons when either is missing. Fully qualify `SwiftUI.Settings` because the app
-has its own `Settings` type.
+**First-run welcome** — `UI/WelcomeSheet.swift`, a sheet over the main window shown once
+(`WelcomeGate`: `Settings.hasSeenWelcome` false and History empty; an existing install is
+marked as having seen it). It shows the mark, the push-to-talk key and the redo gesture in
+keycaps, and the Accessibility and Microphone permissions with "Grant…" buttons, and
+"Start dictating" dismisses it.
+
+**Settings** — `UI/SettingsWindow.swift`, the standard `Settings` scene (⌘,), one native
+grouped `Form` sized to fit without scrolling. Keys: a Push to talk picker over the three
+keys and a Redo picker over the `EraseKey` cases that do not conflict with it (§6.16); either
+change calls `controller.reloadHotkey()`; the footer says "Hold ⟨key⟩ and press ⟨erase
+key⟩ to remove your last dictation and say it again.", or "Erasing is off.". Speech: the
+engine as a segmented picker with its status caption. Text and sound: Clean up, Smart
+cleanup (disabled with the `unavailableReason` shown when the Foundation Model is
+unavailable), and the start sound. Permissions: Accessibility and Microphone with "Grant…"
+buttons when missing. Fully qualify `SwiftUI.Settings` because the app has its own
+`Settings` type.
 
 **Menu bar** — `UI/MenuBarContent.swift`: icon `waveform` / `waveform.circle.fill` when
 active; "Hold ⟨key⟩ to dictate"; unless the erase key is off, a second disabled line

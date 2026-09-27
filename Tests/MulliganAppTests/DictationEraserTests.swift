@@ -264,6 +264,18 @@ struct DictationEraserTests {
         #expect(await eraser.eraseLast(token: EraseToken()) == .nothingToErase)
     }
 
+    @Test func hasErasableFollowsTheRecord() async {
+        let (eraser, _, _, _) = makeEraser()
+        #expect(!eraser.hasErasable)
+        _ = typed(readable: false, eraser: eraser)
+        #expect(eraser.hasErasable)
+        eraser.supersede()
+        #expect(!eraser.hasErasable)
+        _ = typed(readable: false, eraser: eraser)
+        _ = await eraser.eraseLast(token: EraseToken())
+        #expect(!eraser.hasErasable)
+    }
+
     @Test func aRefusalClearsTheRecordToo() async {
         let (eraser, target, _, _) = makeEraser()
         _ = typed(readable: false, eraser: eraser)

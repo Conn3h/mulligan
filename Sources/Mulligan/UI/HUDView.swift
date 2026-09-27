@@ -1,23 +1,35 @@
 import SwiftUI
 
-/// The HUD's content (spec §6.14): a rippling level meter on the left, a coral lamp dot that
-/// lights only while listening, then the two-line status text — all in one row, on a
-/// material card. Hosted by `HUDPanel` via `NSHostingView`.
+/// The HUD's content (spec §6.14): the tee-shot mark on the left, whose ball is the
+/// recording lamp and whose arcs are the level meter, then the two-line status text, on a
+/// material card. For the first holds after a dictation, while nothing has been heard yet,
+/// the second line teaches the redo gesture instead. Hosted by `HUDPanel` via
+/// `NSHostingView`.
 struct HUDView: View {
     let controller: DictationController
 
+    /// Whether this hold showed the redo hint: decided once as listening starts, so using
+    /// up the last hint does not pull it away mid-hold.
+    @State private var hintThisHold = false
+
     var body: some View {
         HStack(spacing: DS.Space.base) {
-            HUDMeterView(level: controller.level, isActive: controller.state.isActive)
+            HUDMeterView(level: controller.level, state: controller.state)
+                .frame(width: DS.TeeShot.width, height: DS.TeeShot.height)
 
-            if case .listening = controller.state {
-                Circle()
-                    .fill(DS.Color.accent)
-                    .frame(width: DS.Metric.lampSize, height: DS.Metric.lampSize)
-                    .accessibilityHidden(true)
+            if showsHint {
+                VStack(alignment: .leading, spacing: DS.Space.hair) {
+                    Text("Listening…")
+                        .font(DS.Font.body)
+                        .foregroundStyle(DS.Color.ink)
+                    Text(RedoHint.text(erase: Settings.shared.eraseKey))
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Color.inkSecondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                HUDLabel(state: controller.state, transcript: controller.transcript)
             }
-
-            HUDLabel(state: controller.state, transcript: controller.transcript)
         }
         .padding(.horizontal, DS.Space.roomy)
         .padding(.vertical, DS.Space.snug)
@@ -27,6 +39,36 @@ struct HUDView: View {
             RoundedRectangle(cornerRadius: DS.Radius.hud)
                 .strokeBorder(DS.Color.hairline, lineWidth: DS.Border.hairline)
         )
+        .onChange(of: controller.state) { _, newValue in
+            updateHint(for: newValue)
+        }
+    }
+
+    private var showsHint: Bool {
+        hintThisHold && controller.state == .listening && controller.transcript.isEmpty
+    }
+
+    private func updateHint(for state: DictationController.State) {
+        let settings = Settings.shared
+        switch state {
+        case .listening:
+            hintThisHold = RedoHint.shows(
+                state: state,
+                transcript: controller.transcript,
+                hasErasable: DictationEraser.shared.hasErasable,
+                remaining: settings.redoHintsRemaining,
+                eraseKey: settings.eraseKey
+            )
+            if hintThisHold {
+                settings.redoHintsRemaining -= 1
+            }
+        case .erasing:
+            // Used once: the lesson is learnt.
+            hintThisHold = false
+            settings.redoHintsRemaining = 0
+        default:
+            hintThisHold = false
+        }
     }
 }
 
@@ -75,70 +117,43 @@ private struct HUDLabel: View {
     }
 }
 
-/// A `DS.Metric.hudBarCount`-bar level meter. Each bar has a fixed phase offset so the group
-/// ripples as a wave rather than pumping in lockstep; bars rest at `DS.Metric.hudBarFloor`
-/// when the meter is inactive or silent.
+/// The tee-shot mark as a live meter: the ball lights coral while listening, and the arcs
+/// follow the level, eased so they swell and settle rather than flicker.
 private struct HUDMeterView: View {
     let level: Float
-    let isActive: Bool
+    let state: DictationController.State
 
     /// A plain reference type the view holds (via `@State`, for stable identity across
-    /// re-renders — the object itself is never reassigned). Its `advance(to:)` mutates a
-    /// plain stored property, not a `@State` value, so calling it from inside the
-    /// `TimelineView` draw closure below is safe: spec §10 warns that mutating an actual
-    /// `@State` value from a `TimelineView`/`Canvas` draw closure floods the log, but plain
-    /// property mutation on a held object never goes through SwiftUI's state machinery.
+    /// re-renders; the object itself is never reassigned). Its `advance` mutates a plain
+    /// stored property, not a `@State` value, so calling it from inside the `TimelineView`
+    /// closure below is safe: spec §10 warns that mutating an actual `@State` value from a
+    /// `TimelineView`/`Canvas` draw closure floods the log.
     @State private var clock = HUDMeterClock()
 
     var body: some View {
-        TimelineView(.animation(paused: !isActive)) { context in
-            let elapsed = clock.advance(to: context.date)
-            HStack(spacing: DS.Metric.hudBarSpacing) {
-                ForEach(0..<DS.Metric.hudBarCount, id: \.self) { index in
-                    bar(index: index, elapsed: elapsed)
-                }
-            }
+        TimelineView(.animation(paused: !state.isActive)) { context in
+            let target = state.isActive ? CGFloat(max(0, min(1, level))) : 0
+            TeeShotMark(
+                level: clock.advance(to: context.date, toward: target),
+                isRecording: state == .listening
+            )
         }
-        .frame(height: DS.Metric.hudBarMaxHeight)
-    }
-
-    private func bar(index: Int, elapsed: TimeInterval) -> some View {
-        let fraction = wave(index: index, elapsed: elapsed)
-        return Capsule()
-            .fill(DS.Color.meterLow.mix(with: DS.Color.meterHigh, by: Double(fraction)))
-            .frame(width: DS.Metric.hudBarWidth, height: height(fraction: fraction))
-    }
-
-    /// 0...1 position in this bar's ripple, offset from every other bar by its index so the
-    /// peak travels across the row instead of every bar rising together.
-    private func wave(index: Int, elapsed: TimeInterval) -> CGFloat {
-        guard isActive, level > 0 else {
-            return 0
-        }
-        let phaseOffset = Double(index) / Double(DS.Metric.hudBarCount) * (2 * .pi)
-        let cyclePosition = elapsed / DS.Motion.hudMeterCycle * (2 * .pi)
-        return CGFloat((sin(cyclePosition + phaseOffset) + 1) / 2)
-    }
-
-    private func height(fraction: CGFloat) -> CGFloat {
-        let amplitude = CGFloat(level) * (DS.Metric.hudBarMaxHeight - DS.Metric.hudBarFloor)
-        return DS.Metric.hudBarFloor + amplitude * fraction
     }
 }
 
-/// See `HUDMeterView`'s doc comment: physics live here, not in `@State`, so the
-/// `TimelineView` draw closure can update it every frame without flooding the log.
+/// See `HUDMeterView`'s doc comment: the eased level lives here, not in `@State`, so the
+/// `TimelineView` closure can update it every frame without flooding the log.
 @MainActor
 private final class HUDMeterClock {
     private var last: Date?
-    private(set) var elapsed: TimeInterval = 0
+    private var level: CGFloat = 0
 
-    @discardableResult
-    func advance(to date: Date) -> TimeInterval {
-        if let last {
-            elapsed += date.timeIntervalSince(last)
-        }
+    /// Eases the shown level toward `target`, settling in about `DS.Motion.quick`.
+    func advance(to date: Date, toward target: CGFloat) -> CGFloat {
+        let dt = last.map { date.timeIntervalSince($0) } ?? 0
         last = date
-        return elapsed
+        let k = DS.Motion.quick > 0 ? min(1, dt / DS.Motion.quick) : 1
+        level += (target - level) * CGFloat(k)
+        return level
     }
 }
