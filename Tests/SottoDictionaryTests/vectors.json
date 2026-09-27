@@ -578,7 +578,13 @@
     ],
     "input": "I use Next.js daily.",
     "expected": "I use Next.js daily.",
-    "applied": []
+    "applied": [
+      {
+        "from": "Next.js",
+        "to": "Next.js",
+        "count": 1
+      }
+    ]
   },
   {
     "name": "write text already present is not duplicated (cloud -> Cloud Code)",
@@ -591,7 +597,13 @@
     ],
     "input": "Open Cloud Code now.",
     "expected": "Open Cloud Code now.",
-    "applied": []
+    "applied": [
+      {
+        "from": "Cloud Code",
+        "to": "Cloud Code",
+        "count": 1
+      }
+    ]
   },
   {
     "name": "unfenced write occurrence still duplicates as before",
@@ -661,6 +673,31 @@
     ],
     "input": "I love Next.js's plugins.",
     "expected": "I love Next.js's plugins.",
-    "applied": []
+    "applied": [
+      {
+        "from": "Next.js",
+        "to": "Next.js",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "write text already present in the wrong case is recased, not duplicated",
+    "entries": [
+      {
+        "kind": "correction",
+        "hear": "cloud",
+        "write": "Cloud Code"
+      }
+    ],
+    "input": "open cloud code now",
+    "expected": "open Cloud Code now",
+    "applied": [
+      {
+        "from": "cloud code",
+        "to": "Cloud Code",
+        "count": 1
+      }
+    ]
   }
 ]

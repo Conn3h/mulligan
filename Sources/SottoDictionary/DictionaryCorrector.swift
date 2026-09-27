@@ -29,9 +29,9 @@ public struct AppliedCorrection: Codable, Hashable, Sendable {
 /// spaced and hyphenated forms all match, case-insensitively; a match must not be fenced by
 /// a letter, digit, combining mark or hyphen on either side (apostrophes are boundaries, so
 /// possessives are corrected); a single left-to-right scan resolves overlaps by longest
-/// match, ties going to the earlier entry, and never re-matches replacement text; a match
-/// whose `write` text is already present beyond the trigger's own span is left untouched
-/// instead of being duplicated, and scanning resumes past it.
+/// match, ties going to the earlier entry, and never re-matches replacement text; when the
+/// entry's `write` text is already present beyond the trigger's own span, the whole existing
+/// span is replaced (so it is recased, never duplicated) and scanning resumes past it.
 public struct DictionaryCorrector: Sendable {
     /// A trigger pattern paired with its replacement, in the order its owning entry
     /// appears in `entries`. Only enabled `.correction` entries with a non-empty trigger
@@ -170,23 +170,22 @@ public struct DictionaryCorrector: Sendable {
 
             if let bestIndex, let bestRange {
                 let rule = rules[bestIndex]
-                if let already = Self.alreadyReadsAsWrite(normalized, matchEnd: bestRange.upperBound, start: bestRange.lowerBound, write: rule.normalizedWrite) {
-                    // The text already reads as this entry's `write` beyond the trigger's
-                    // own span (e.g. `next -> Next.js` seeing "Next.js"), so replacing here
-                    // would duplicate the part the trigger did not consume. Leave it as-is
-                    // and resume past it, so nothing -- this rule or any other -- re-matches
-                    // inside it.
-                    output += normalized[already]
-                    cursor = already.upperBound
-                } else {
-                    output += rule.write
-                    if firstFrom[bestIndex] == nil {
-                        firstFrom[bestIndex] = String(normalized[bestRange])
-                        firstFireOrder.append(bestIndex)
-                    }
-                    counts[bestIndex, default: 0] += 1
-                    cursor = bestRange.upperBound
+                // The text may already read as this entry's `write` beyond the trigger's own
+                // span (e.g. `next -> Next.js` seeing "Next.js"). Replacing only the trigger
+                // would duplicate the rest, so the whole existing span is replaced instead:
+                // idempotent, and still fixes its casing. Scanning resumes past it, so
+                // nothing -- this rule or any other -- re-matches inside it.
+                let already = Self.alreadyReadsAsWrite(
+                    normalized, matchEnd: bestRange.upperBound, start: bestRange.lowerBound, write: rule.normalizedWrite
+                )
+                let replaced = already ?? bestRange
+                output += rule.write
+                if firstFrom[bestIndex] == nil {
+                    firstFrom[bestIndex] = String(normalized[replaced])
+                    firstFireOrder.append(bestIndex)
                 }
+                counts[bestIndex, default: 0] += 1
+                cursor = replaced.upperBound
             } else {
                 output.append(normalized[cursor])
                 cursor = normalized.index(after: cursor)
@@ -251,8 +250,8 @@ public struct DictionaryCorrector: Sendable {
 
     /// If `text` already reads as `write` (case-insensitively) starting at `start`, and that
     /// occurrence reaches past `matchEnd` (the trigger's own match end) with a proper fence
-    /// on its far side, returns the occurrence's range so the caller can skip past it instead
-    /// of replacing. A `write` occurrence no longer than the trigger's own match (e.g.
+    /// on its far side, returns the occurrence's range so the caller replaces all of it
+    /// rather than only the trigger's part. A `write` occurrence no longer than the trigger's own match (e.g.
     /// `codex -> Codex` matching "codex") is not an already-written span -- there is nothing
     /// beyond the match that would be duplicated, so it still recases normally.
     ///
