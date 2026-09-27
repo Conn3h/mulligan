@@ -622,6 +622,15 @@ quiet one-word answer peaks no higher on the meter than a silent hold's backgrou
 (measured 0.21–0.35 against 0.21–0.27), so a level threshold either misses silent holds or
 swallows short words.
 
+**Silent holds that become words.** Parakeet also turns silence into ordinary words ("Yeah.",
+"Okay."), which `FillerOnly` must keep because people say them. For a Parakeet hold of at most
+3 s, the engine keeps the audio and, before yielding the final text, scores it with FluidAudio's
+Silero speech detector (`VadManager`, loaded with the Parakeet models); when no 256 ms window
+reaches `SpeechEvidence.threshold` (0.7, `SottoText`), the final text is empty and nothing is
+typed. Measured 2026-09-27: silent holds peaked at 0.10–0.56, soft one-word answers at
+0.96–1.00, and the check took about 2 ms. Longer holds, a detector that failed to load, or a
+detector error keep the text (logged). This is a speech model, not a loudness gate.
+
 **Press while ending**: a press that arrives while the session is terminating (the user
 presses again during "Transcribing…", or a recovered lost release is followed at once by
 its press, §6.4) is **queued**, not dropped: it starts as soon as the terminal task returns

@@ -22,8 +22,8 @@ final class ParakeetModels {
     struct Loaded: Sendable {
         let asr: AsrModels
         let ctc: CtcModels?
-        /// Silero speech detector, scoring short holds (measurement, 2026-09-27). Nil when it
-        /// failed to load; dictation is unaffected.
+        /// Silero speech detector for the short-hold speech check (§6.7). Nil when it failed
+        /// to load; short holds are then kept as before.
         let vad: VadManager?
     }
 
@@ -116,7 +116,7 @@ final class ParakeetModels {
         }
     }
 
-    /// The speech detector. A failure is logged and only disables the speech probe.
+    /// The speech detector. A failure is logged and only disables the speech check.
     private static func loadVad() async -> VadManager? {
         do {
             let vad = try await VadManager()
