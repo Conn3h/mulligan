@@ -1,0 +1,23 @@
+Tests/SottoAppTests/HotkeyMonitorTests.swift
+  s_54db94c607acba::t_5403998e66642f 91-109,133-135,141-142,145,151-152,158-160,166-168,174,176,181-182,185-186,191-192,197,202-203,206,212-213,237,246-247,252-253
+  s_54db94c607acba::t_65cedde1fe72b2 217-233
+Sources/Sotto/Core/HotkeyMonitor.swift
+  s_54db94c607acba::t_667639a19bb6b1 96-99,175,211-216,218,221
+  s_54db94c607acba::t_6ba6de8a93b999 196
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "21a8ca3670c0d5d77722feb6998d41211aff578b",
+  "prompts": {},
+  "sessions": {
+    "s_54db94c607acba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9cec764-c6e0-4aee-98d4-309aa9357e9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
