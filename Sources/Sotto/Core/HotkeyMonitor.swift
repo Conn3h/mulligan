@@ -49,8 +49,11 @@ enum PushToTalkKey: String, CaseIterable, Sendable {
 @MainActor
 protocol HotkeySource: AnyObject {
     var key: PushToTalkKey { get set }
+    /// Tapped while `key` is held, erases the last dictation (§6.16).
+    var eraseKey: EraseKey { get set }
     var onPress: (() -> Void)? { get set }
     var onRelease: (() -> Void)? { get set }
+    var onErase: (() -> Void)? { get set }
     /// False when the tap cannot be created, which means Accessibility is not granted.
     @discardableResult func start() -> Bool
     func stop()
@@ -62,19 +65,41 @@ protocol HotkeySource: AnyObject {
 @MainActor
 final class HotkeyMonitor: HotkeySource {
     var key: PushToTalkKey = .rightOption
+    var eraseKey: EraseKey = .rightCommand
     var onPress: (() -> Void)?
     var onRelease: (() -> Void)?
+    var onErase: (() -> Void)?
 
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var isPressed = false
+    /// True between an erase-key down Sotto swallowed and its up, which is swallowed too so
+    /// the target never sees a modifier up without its down.
+    private var eraseModifierSwallowed = false
 
     /// Reads whether the push-to-talk key is physically down right now. Keyed by virtual
     /// keycode, not modifier flag: the device-specific Right-Option / Right-Command bits are
     /// not reliably reported by `CGEventSource` flag state, but per-key state is. Injectable
     /// so the reconciliation path can be unit-tested without a real event tap.
     var isKeyDown: (PushToTalkKey) -> Bool = { key in
-        CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(key.keyCode))
+        HotkeyMonitor.isPhysicallyDown(CGKeyCode(key.keyCode))
+    }
+
+    /// Physical state of the erase key, by keycode like `isKeyDown`. Injectable for tests.
+    var isEraseKeyDown: (EraseKey) -> Bool = { key in
+        guard let code = key.keyCode else {
+            return false
+        }
+        return HotkeyMonitor.isPhysicallyDown(CGKeyCode(code))
+    }
+
+    /// Down in either the hardware state or the session state. Only reconciliation uses it,
+    /// where "down" merely waits for a real release. Measured 2026-09-27: both states read a
+    /// right-hand modifier this tap swallows as up while it is held, so nothing that needs a
+    /// true "held" may rely on it; the erase path reads event flags instead.
+    nonisolated static func isPhysicallyDown(_ keyCode: CGKeyCode) -> Bool {
+        CGEventSource.keyState(.hidSystemState, key: keyCode)
+            || CGEventSource.keyState(.combinedSessionState, key: keyCode)
     }
 
     init() {}
@@ -118,6 +143,7 @@ final class HotkeyMonitor: HotkeySource {
     /// controller ends any utterance before it stops or reloads the monitor.
     func stop() {
         isPressed = false
+        eraseModifierSwallowed = false
         guard let tap else {
             return
         }
@@ -143,6 +169,11 @@ final class HotkeyMonitor: HotkeySource {
             reconcilePressedState()
             return false
         case .flagsChanged:
+            // Push to talk always wins a shared keycode; Settings never allows one (§6.16).
+            if let eraseCode = eraseKey.keyCode, let eraseFlag = eraseKey.flag,
+               keyCode == eraseCode, eraseCode != key.keyCode {
+                return handleEraseModifier(down: flags.contains(eraseFlag), pushToTalkHeld: flags.contains(key.flag))
+            }
             guard keyCode == key.keyCode else {
                 return false
             }
@@ -160,6 +191,12 @@ final class HotkeyMonitor: HotkeySource {
                 Log.hotkey.debug("\(self.key.displayName, privacy: .public) \(pressed ? "down" : "up", privacy: .public)")
                 if pressed {
                     onPress?()
+                    // The other order: the erase key was already down when push to talk went
+                    // down. Its down reached the app, so its up must too (no swallow flag).
+                    if let eraseFlag = eraseKey.flag, eraseKey.keyCode != key.keyCode, flags.contains(eraseFlag) {
+                        Log.hotkey.info("erase key already down as \(self.key.displayName, privacy: .public) went down")
+                        onErase?()
+                    }
                 } else {
                     onRelease?()
                 }
@@ -170,12 +207,49 @@ final class HotkeyMonitor: HotkeySource {
         }
     }
 
+    /// The erase modifier's own `.flagsChanged` (§6.16). It fires only while push to talk is
+    /// both believed down and held according to this very event's flags, so a stale
+    /// `isPressed` cannot turn every Right Command into an erase. (The key-state probe cannot
+    /// be used here: it reads a modifier this tap swallows as up while it is held.) A down that
+    /// passes through clears the swallow flag, so a lost up can never make Sotto eat a later
+    /// ordinary Command up and leave Command stuck in the app.
+    private func handleEraseModifier(down: Bool, pushToTalkHeld: Bool) -> Bool {
+        if down {
+            guard isPressed, pushToTalkHeld else {
+                if isPressed {
+                    Log.hotkey.info(
+                        "erase key ignored: \(self.key.displayName, privacy: .public) is believed down but the event says it is up"
+                    )
+                }
+                eraseModifierSwallowed = false
+                return false
+            }
+            if !eraseModifierSwallowed {
+                eraseModifierSwallowed = true
+                Log.hotkey.info(
+                    "erase key \(self.eraseKey.displayName, privacy: .public) while \(self.key.displayName, privacy: .public) held"
+                )
+                onErase?()
+            }
+            return true
+        }
+        guard eraseModifierSwallowed else {
+            return false
+        }
+        eraseModifierSwallowed = false
+        return true
+    }
+
     /// While the tap was disabled it delivered no events, so a release that happened in that
     /// window produced no `.flagsChanged` and `isPressed` is stale-high: the utterance would
     /// never end and the mic would stay hot. On re-enable, compare against the real key state
     /// and emit the missed release. Only the release direction is reconciled; a missed press
     /// is left alone rather than start recording from a key the user is merely still holding.
     private func reconcilePressedState() {
+        if eraseModifierSwallowed, !isEraseKeyDown(eraseKey) {
+            eraseModifierSwallowed = false
+            Log.hotkey.info("erase key up was lost while the tap was disabled; nothing left to swallow")
+        }
         guard isPressed, !isKeyDown(key) else {
             return
         }

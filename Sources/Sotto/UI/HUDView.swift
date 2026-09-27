@@ -32,7 +32,8 @@ struct HUDView: View {
 
 /// The two-line status text: "Preparing…" while `.starting`, "Listening…" while `.listening`
 /// with an empty transcript, the live transcript otherwise, "Transcribing…" while
-/// `.finishing` with an empty transcript, or the error message in `DS.Color.accent`.
+/// `.finishing` with an empty transcript, "Erasing…" while `.erasing`, or the error message
+/// in `DS.Color.accent`.
 /// `.idle` never renders (the HUD is dismissed then), so it falls back to empty text.
 private struct HUDLabel: View {
     let state: DictationController.State
@@ -56,6 +57,8 @@ private struct HUDLabel: View {
             transcript.isEmpty ? "Listening…" : transcript
         case .finishing:
             transcript.isEmpty ? "Transcribing…" : transcript
+        case .erasing:
+            "Erasing…"
         case .error(let message):
             message
         case .idle:

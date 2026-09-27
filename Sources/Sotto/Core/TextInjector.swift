@@ -11,6 +11,9 @@ import Foundation
 /// the next paste awaits it before taking its own snapshot (so it can never capture our
 /// text as the "original" and restore it for good), and `flushPendingRestore()` performs
 /// it at once when the app quits.
+///
+/// Every insert runs on `MutationLane`, so it never overlaps an erase (§6.16), and reports
+/// what landed to `observer` so the last dictation can be erased.
 @MainActor
 enum TextInjector {
     private typealias SavedItem = [NSPasteboard.PasteboardType: Data]
@@ -42,13 +45,33 @@ enum TextInjector {
     /// user has almost certainly moved on, and a leading space would be wrong.
     private static let pasteRunOnWindow: Duration = .seconds(8)
 
-    private struct LastInjection {
-        let bundleID: String?
-        let at: ContinuousClock.Instant
-        let endedInWhitespace: Bool
-    }
-    private static var lastInjection: LastInjection?
+    private static var lastInjection: LastInjectionSnapshot?
     private static let injectionClock = ContinuousClock()
+
+    /// Receives what each insert typed (the eraser, set at launch). Nil in tests.
+    static var observer: (any TypingObserver)?
+
+    /// The run-on state an erase restores (§6.16).
+    static var lastInjectionSnapshot: LastInjectionSnapshot? { lastInjection }
+
+    static func restoreLastInjection(_ snapshot: LastInjectionSnapshot?) {
+        lastInjection = snapshot
+        Log.inject.info("run-on state restored after an erase")
+    }
+
+    /// AX messaging timeout for this process. The default is about 6 s, during which a hung
+    /// target would freeze the main actor, the event tap and every timer (§10). Not shorter:
+    /// the insert path shares it, and a write that times out on our side but still lands in
+    /// a slow app would then be pasted a second time.
+    private static let accessibilityMessagingTimeout: Float = 1.0
+
+    /// Caps every synchronous AX call process-wide. Called once at launch.
+    static func configureAccessibilityTimeout() {
+        let error = AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), accessibilityMessagingTimeout)
+        if error != .success {
+            Log.inject.error("could not set the AX messaging timeout (AXError \(error.rawValue, privacy: .public))")
+        }
+    }
 
     /// Returns once the text has been handed to the focused app. On the paste path the
     /// pasteboard is restored `pasteCompletionDelay` later, so the caller (and the user)
@@ -56,18 +79,134 @@ enum TextInjector {
     /// `targetProcessID` is the app the text is meant for: the paste is abandoned if another
     /// app comes to the front while the accessibility write is being verified.
     @discardableResult
-    static func insert(_ text: String, targetProcessID: pid_t? = nil) async -> Outcome {
+    /// `generation` is the delivery this text belongs to (§6.16); nil means the current one.
+    static func insert(_ text: String, targetProcessID: pid_t? = nil, generation: UInt64? = nil) async -> Outcome {
+        await MutationLane.run {
+            await insertExclusive(text, targetProcessID: targetProcessID, generation: generation)
+        }
+    }
+
+    /// The insert itself, run on the lane. Returns the outcome and, for a paste, the settle
+    /// the next mutation must wait for (the paste lands asynchronously in the target).
+    private static func insertExclusive(
+        _ text: String, targetProcessID: pid_t?, generation: UInt64?
+    ) async -> (Outcome, Task<Void, Never>?) {
         guard !text.isEmpty else {
             Log.inject.info("nothing to insert")
-            return .landed
+            return (.landed, nil)
         }
-        guard let reason = await insertViaAccessibility(text) else {
-            return .landed
+        // Who the text is for, captured before anything changes: the eraser must be able to
+        // tell this insert's field from any other (§6.16).
+        let target = InsertTarget(
+            processID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            focus: focusedTarget(),
+            inputEpoch: observer?.inputEpoch ?? 0,
+            generation: generation ?? observer?.deliveryGeneration ?? 0,
+            previousInjection: lastInjection
+        )
+        let reason: String
+        switch await insertViaAccessibility(text) {
+        case let .landed(inserted, caretEnd):
+            record(inserted, caretEnd: caretEnd, for: target)
+            return (.landed, nil)
+        case .notTrusted(let why):
+            reason = why
         }
         Log.inject.info(
             "accessibility path not trusted (\(reason, privacy: .public)); pasting \(text.count, privacy: .public) chars"
         )
-        return await insertViaPasteboard(text, targetProcessID: targetProcessID)
+        let (outcome, outgoing) = await insertViaPasteboard(text, targetProcessID: targetProcessID)
+        guard outcome == .landed else {
+            return (outcome, nil)
+        }
+        // Recorded once the paste has had time to land, reading the caret it left.
+        let settle = Task { @MainActor in
+            await wait(pasteCompletionDelay)
+            let caretEnd = target.focus.element
+                .flatMap { selectedRange(of: $0.element) }
+                .map { $0.location + $0.length }
+            record(outgoing, caretEnd: caretEnd, for: target)
+        }
+        return (.landed, settle)
+    }
+
+    /// The focused element and its window, when readable. `isScreen` marks a terminal's
+    /// screen, whose text never proves anything (`TerminalApps`).
+    struct FocusedTarget {
+        let element: AXElementID?
+        let window: AXElementID?
+        let isScreen: Bool
+    }
+
+    /// Everything about the target known before an insert.
+    private struct InsertTarget {
+        let processID: pid_t?
+        let focus: FocusedTarget
+        let inputEpoch: UInt64
+        let generation: UInt64
+        let previousInjection: LastInjectionSnapshot?
+    }
+
+    private static func record(_ delivered: String, caretEnd: Int?, for target: InsertTarget) {
+        guard let observer else {
+            return
+        }
+        guard let processID = target.processID else {
+            Log.inject.info("typed \(delivered.count, privacy: .public) chars into an unknown app; not erasable")
+            return
+        }
+        // Input while the insert was landing (a click during a paste's settle, say) means the
+        // focus and caret read now may belong to other text. Recorded without them, so the
+        // unchanged-input rule refuses it rather than trusting a caret that moved (§6.16).
+        let touched = !TypedDictation.landingIsTrusted(
+            monitoring: observer.isMonitoring, epochBefore: target.inputEpoch, epochNow: observer.inputEpoch
+        )
+        if touched {
+            Log.inject.info("input arrived (or went unmonitored) while the text was landing; recorded as not erasable here")
+        }
+        observer.recordTyped(TypedDictation(
+            text: delivered,
+            processID: processID,
+            element: touched ? nil : target.focus.element,
+            window: touched ? nil : target.focus.window,
+            caretEnd: touched || target.focus.isScreen ? nil : caretEnd,
+            landedAt: injectionClock.now,
+            previousInjection: target.previousInjection,
+            inputEpoch: target.inputEpoch,
+            generation: target.generation,
+            textProvable: !target.focus.isScreen
+        ))
+    }
+
+    /// Read before an insert and at erase time, so the eraser can tell this field apart.
+    static func focusedTarget() -> FocusedTarget {
+        var focusedValue: CFTypeRef?
+        let focusedError = AXUIElementCopyAttributeValue(
+            AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute as CFString, &focusedValue
+        )
+        guard focusedError == .success, let focusedValue, CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else {
+            Log.inject.debug("no readable focused element (AXError \(focusedError.rawValue, privacy: .public))")
+            return FocusedTarget(element: nil, window: nil, isScreen: false)
+        }
+        let focused = focusedValue as! AXUIElement
+        var windowValue: CFTypeRef?
+        let windowError = AXUIElementCopyAttributeValue(focused, kAXWindowAttribute as CFString, &windowValue)
+        let window: AXElementID?
+        if windowError == .success, let windowValue, CFGetTypeID(windowValue) == AXUIElementGetTypeID() {
+            window = AXElementID(element: windowValue as! AXUIElement)
+        } else {
+            Log.inject.debug("focused element has no readable window (AXError \(windowError.rawValue, privacy: .public))")
+            window = nil
+        }
+        var roleValue: CFTypeRef?
+        let roleError = AXUIElementCopyAttributeValue(focused, kAXRoleAttribute as CFString, &roleValue)
+        if roleError != .success {
+            Log.inject.debug("focused element role unreadable (AXError \(roleError.rawValue, privacy: .public))")
+        }
+        let isScreen = TerminalApps.isScreen(
+            bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier, role: roleValue as? String
+        )
+        return FocusedTarget(element: AXElementID(element: focused), window: window, isScreen: isScreen)
     }
 
     enum Outcome: Sendable, Equatable {
@@ -88,13 +227,19 @@ enum TextInjector {
 
     // MARK: Accessibility
 
-    /// Nil when the write was verified by caret movement or a changed character count;
+    private enum AccessibilityResult {
+        /// The string actually written (with any leading space) and the caret after it.
+        case landed(inserted: String, caretEnd: Int?)
+        case notTrusted(String)
+    }
+
+    /// `.landed` when the write was verified by caret movement or a changed character count;
     /// otherwise the reason to fall back. "Moved" rather than "moved by exactly the text
     /// length": autocorrect and newline normalisation shift the caret by other amounts, and
     /// falling back after a write that did land would paste the text twice. Some apps
     /// (Firefox) apply the write at once but report the new selection only a moment later,
     /// so the check polls for `accessibilityVerifyTimeout` before giving up.
-    private static func insertViaAccessibility(_ text: String) async -> String? {
+    private static func insertViaAccessibility(_ text: String) async -> AccessibilityResult {
         let systemWide = AXUIElementCreateSystemWide()
         var focusedValue: CFTypeRef?
         let focusedError = AXUIElementCopyAttributeValue(
@@ -103,43 +248,44 @@ enum TextInjector {
         guard focusedError == .success, let focusedValue,
               CFGetTypeID(focusedValue) == AXUIElementGetTypeID()
         else {
-            return "no focused element (AXError \(focusedError.rawValue))"
+            return .notTrusted("no focused element (AXError \(focusedError.rawValue))")
         }
         let focused = focusedValue as! AXUIElement
 
         var settable: DarwinBoolean = false
         let settableError = AXUIElementIsAttributeSettable(focused, kAXSelectedTextAttribute as CFString, &settable)
         guard settableError == .success else {
-            return "selected text settability unknown (AXError \(settableError.rawValue))"
+            return .notTrusted("selected text settability unknown (AXError \(settableError.rawValue))")
         }
         guard settable.boolValue else {
-            return "selected text is not settable"
+            return .notTrusted("selected text is not settable")
         }
 
         guard let before = selectedRange(of: focused) else {
-            return "selection range unreadable before the write"
+            return .notTrusted("selection range unreadable before the write")
         }
         let countBefore = characterCount(of: focused)
         let leadingSpace = needsLeadingSpace(in: focused, before: before)
         let inserted = leadingSpace ? " " + text : text
         let writeError = AXUIElementSetAttributeValue(focused, kAXSelectedTextAttribute as CFString, inserted as CFString)
         guard writeError == .success else {
-            return "write failed (AXError \(writeError.rawValue))"
+            return .notTrusted("write failed (AXError \(writeError.rawValue))")
         }
         let started = injectionClock.now
         let expected = ExpectedWrite(before: before, insertedUnits: (inserted as NSString).length, countBefore: countBefore)
         guard let evidence = await awaitWriteEvidence(on: focused, expecting: expected) else {
-            return "write reported success but neither the selection nor the length changed within \(accessibilityVerifyTimeout)"
+            return .notTrusted("write reported success but neither the selection nor the length changed within \(accessibilityVerifyTimeout)")
         }
         Log.inject.info(
             "inserted \(inserted.count, privacy: .public) chars via accessibility (leading space: \(leadingSpace, privacy: .public)); verified by \(evidence, privacy: .public) after \(injectionClock.now - started, privacy: .public)"
         )
-        lastInjection = LastInjection(
+        lastInjection = LastInjectionSnapshot(
             bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
             at: injectionClock.now,
             endedInWhitespace: inserted.last?.isWhitespace ?? false
         )
-        return nil
+        let caretEnd = selectedRange(of: focused).map { $0.location + $0.length }
+        return .landed(inserted: inserted, caretEnd: caretEnd)
     }
 
     /// What a landed write looks like: the caret (or a selection of the new text) now ends
@@ -212,7 +358,7 @@ enum TextInjector {
         }
     }
 
-    private static func characterCount(of element: AXUIElement) -> Int? {
+    static func characterCount(of element: AXUIElement) -> Int? {
         var value: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(element, kAXNumberOfCharactersAttribute as CFString, &value)
         guard error == .success, let count = value as? Int else {
@@ -222,7 +368,7 @@ enum TextInjector {
         return count
     }
 
-    private static func selectedRange(of element: AXUIElement) -> CFRange? {
+    static func selectedRange(of element: AXUIElement) -> CFRange? {
         var value: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &value)
         guard error == .success, let value, CFGetTypeID(value) == AXValueGetTypeID() else {
@@ -318,7 +464,8 @@ enum TextInjector {
 
     // MARK: Pasteboard
 
-    private static func insertViaPasteboard(_ text: String, targetProcessID: pid_t?) async -> Outcome {
+    /// The outcome and the string pasted (with any leading space).
+    private static func insertViaPasteboard(_ text: String, targetProcessID: pid_t?) async -> (Outcome, String) {
         await awaitPendingRestore()
         let outgoing = Self.pasteRunOnLeadingSpaceNeeded() ? " " + text : text
         let pasteboard = NSPasteboard.general
@@ -327,7 +474,7 @@ enum TextInjector {
         guard pasteboard.setString(outgoing, forType: .string) else {
             Log.inject.error("pasteboard write failed; nothing inserted")
             restore(saved, to: pasteboard)
-            return .failed
+            return (.failed, outgoing)
         }
         let ourChangeCount = pasteboard.changeCount
         // Registered before the first suspension: a quit during the settle wait must still
@@ -337,7 +484,7 @@ enum TextInjector {
         await wait(pasteboardSettleDelay)
         guard pendingRestore?.changeCount == ourChangeCount else {
             Log.inject.info("pasteboard was restored during the settle wait; not pasting")
-            return .failed
+            return (.failed, outgoing)
         }
         // The accessibility verification and the settle wait both suspend; Command-V goes
         // to whatever app is in front now, which must still be the one the text is for.
@@ -347,21 +494,21 @@ enum TextInjector {
                 "frontmost app changed before Command-V (pid \(targetProcessID, privacy: .public) -> \(frontmost, privacy: .public)); not pasting"
             )
             performPendingRestore(reason: "focus moved")
-            return .focusMoved
+            return (.focusMoved, outgoing)
         }
         guard postCommandV() else {
             Log.inject.error("could not synthesize Command-V; nothing inserted")
             performPendingRestore(reason: "Command-V failed")
-            return .failed
+            return (.failed, outgoing)
         }
         Log.inject.info("pasted \(outgoing.count, privacy: .public) chars via Command-V")
-        lastInjection = LastInjection(
+        lastInjection = LastInjectionSnapshot(
             bundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
             at: injectionClock.now,
             endedInWhitespace: outgoing.last?.isWhitespace ?? false
         )
         scheduleRestoreTask()
-        return .landed
+        return (.landed, outgoing)
     }
 
     /// True when this paste immediately follows our own injection into the same frontmost
@@ -469,6 +616,9 @@ enum TextInjector {
         }
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand
+        // Marked so the eraser's input monitor does not count our own paste as user input.
+        SyntheticEvent.mark(keyDown)
+        SyntheticEvent.mark(keyUp)
         keyDown.post(tap: .cghidEventTap)
         keyUp.post(tap: .cghidEventTap)
         return true
@@ -481,4 +631,20 @@ enum TextInjector {
             Log.inject.debug("injection wait cancelled")
         }
     }
+}
+
+/// Told about every insert that landed, and when a new delivery begins (§6.16).
+@MainActor
+protocol TypingObserver: AnyObject {
+    /// Bumped by any user key, click, scroll, app or Space switch.
+    var inputEpoch: UInt64 { get }
+    /// Bumped by `supersede()`, once per delivery.
+    var deliveryGeneration: UInt64 { get }
+    /// False when the input monitor is not running; no landing is then trusted.
+    var isMonitoring: Bool { get }
+    func recordTyped(_ typed: TypedDictation)
+    /// A new delivery has begun; the previous record is no longer the last dictation.
+    /// Returns the new delivery's generation.
+    @discardableResult
+    func supersede() -> UInt64
 }

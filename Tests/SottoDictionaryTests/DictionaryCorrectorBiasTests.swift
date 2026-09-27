@@ -69,3 +69,55 @@ struct DictionaryCorrectorBiasTests {
         #expect(phrases.last == "Word\(DictionaryCorrector.biasLimit)")
     }
 }
+
+@Suite("DictionaryCorrector.vocabularyPhrases")
+struct DictionaryCorrectorVocabularyTests {
+    @Test(arguments: [
+        ("security codex", "security code"),
+        ("cloud session", "Claude session"),
+        ("hard codex", "hard-coded"),
+        ("cloud code", "Claude Code"),
+    ])
+    func sharedWordMultiWordCorrectionsAreContext(_ hear: String, _ write: String) {
+        #expect(DictionaryCorrector.isContextCorrection(.correction(hear: hear, write: write)))
+    }
+
+    @Test(arguments: [
+        ("clawed", "Claude"),
+        ("codex", "Codex"),
+        ("burr cell", "Vercel"),
+        ("versal app", "Vercel dashboard"),
+    ])
+    func otherCorrectionsAreNotContext(_ hear: String, _ write: String) {
+        #expect(!DictionaryCorrector.isContextCorrection(.correction(hear: hear, write: write)))
+    }
+
+    @Test func termsAreNeverContext() {
+        #expect(!DictionaryCorrector.isContextCorrection(.term("Claude Code")))
+    }
+
+    @Test func contextTargetsAreDropped() {
+        let entries: [DictionaryEntry] = [
+            .term("Codex"),
+            .correction(hear: "security codex", write: "security code"),
+            .correction(hear: "clawed", write: "Claude"),
+        ]
+        #expect(DictionaryCorrector.vocabularyPhrases(from: entries) == ["Codex", "Claude"])
+    }
+
+    @Test func aContextTargetNamedElsewhereStillBoosts() {
+        let entries: [DictionaryEntry] = [
+            .correction(hear: "cloud code", write: "Claude Code"),
+            .term("Claude Code"),
+        ]
+        #expect(DictionaryCorrector.vocabularyPhrases(from: entries) == ["Claude Code"])
+    }
+
+    @Test func matchesBiasPhrasesWhenThereAreNoContextCorrections() {
+        let entries: [DictionaryEntry] = [
+            .term("Alpha"), .correction(hear: "beeta", write: "Beta"), .term("alpha"),
+            DictionaryEntry(kind: .term, write: "Off", isEnabled: false),
+        ] + (0..<120).map { .term("T\($0)") }
+        #expect(DictionaryCorrector.vocabularyPhrases(from: entries) == DictionaryCorrector.biasPhrases(from: entries))
+    }
+}

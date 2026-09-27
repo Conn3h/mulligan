@@ -39,11 +39,13 @@ final class DictationController {
         case starting
         case listening
         case finishing
+        /// Removing the last dictation from the target app (§6.16).
+        case erasing
         case error(String)
 
         var isActive: Bool {
             switch self {
-            case .starting, .listening, .finishing: true
+            case .starting, .listening, .finishing, .erasing: true
             case .idle, .error: false
             }
         }
@@ -63,6 +65,8 @@ final class DictationController {
         case tapped
         case failed(String)
         case aborted
+        /// The erase key: cancels like `.tapped`, then the terminal task erases (§6.16).
+        case erased
 
         /// True only for `.released`: the path that finalizes the engine, fires the callback,
         /// and shows `.finishing`. A tap is deliberately not a release.
@@ -79,6 +83,7 @@ final class DictationController {
             case .tapped: "tapped"
             case .failed: "failed"
             case .aborted: "aborted"
+            case .erased: "erased"
             }
         }
     }
@@ -107,6 +112,10 @@ final class DictationController {
         var watchdogTask: Task<Void, Never>?
         /// Loudest raw meter level this hold, logged at release for diagnosis.
         var peakLevel: Float = 0
+        /// The terminal task erases the last dictation before returning to idle (§6.16):
+        /// this utterance's own, cancelled by the erase key, or one that was already ending
+        /// when the key was pressed again and the erase key tapped.
+        var eraseRequested = false
 
         init(id: Int, source: UtteranceSource, pressedAt: ContinuousClock.Instant) {
             self.id = id
@@ -184,6 +193,12 @@ final class DictationController {
     /// controller stops waiting and returns to idle; the in-flight delivery is left to finish
     /// on its own rather than cancelled mid-paste.
     @ObservationIgnored private let deliveryTimeout: Duration
+    /// A cap on the erase so a stuck target cannot hold `.erasing`. On timeout the eraser's
+    /// token is revoked, so it stops before its next side effect.
+    @ObservationIgnored private let eraseTimeout: Duration
+    @ObservationIgnored private let eraseLast: @MainActor (EraseToken) async -> EraseOutcome
+    /// The erase in flight, revoked by a timeout or `deactivate()`.
+    @ObservationIgnored private var eraseToken: EraseToken?
     @ObservationIgnored private let clock = ContinuousClock()
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var session: Session?
@@ -201,7 +216,9 @@ final class DictationController {
         engineFinishTimeout: Duration = .seconds(2),
         minimumHold: Duration = .milliseconds(250),
         maxHold: Duration = .seconds(180),
-        deliveryTimeout: Duration = .seconds(10)
+        deliveryTimeout: Duration = .seconds(10),
+        eraseTimeout: Duration = .seconds(3),
+        eraseLast: @escaping @MainActor (EraseToken) async -> EraseOutcome = { _ in .nothingToErase }
     ) {
         self.hotkey = hotkey
         self.capture = capture
@@ -212,6 +229,8 @@ final class DictationController {
         self.minimumHold = minimumHold
         self.maxHold = maxHold
         self.deliveryTimeout = deliveryTimeout
+        self.eraseTimeout = eraseTimeout
+        self.eraseLast = eraseLast
     }
 
     // MARK: Public controls
@@ -221,11 +240,15 @@ final class DictationController {
     @discardableResult
     func activate() -> Bool {
         hotkey.key = Settings.shared.pushToTalkKey
+        hotkey.eraseKey = Settings.shared.eraseKey
         hotkey.onPress = { [weak self] in
             self?.press(source: .hotkey)
         }
         hotkey.onRelease = { [weak self] in
             self?.release(onlyFrom: .hotkey)
+        }
+        hotkey.onErase = { [weak self] in
+            self?.erase()
         }
         let started = hotkey.start()
         if !started {
@@ -236,6 +259,13 @@ final class DictationController {
 
     /// Ends any utterance without a final callback, then stops the hotkey.
     func deactivate() {
+        // An erase already running stops before its next side effect; one requested but not
+        // yet started (its utterance is still unwinding) never starts.
+        eraseToken?.revoke()
+        if let session, session.eraseRequested {
+            session.eraseRequested = false
+            Log.app.info("erase for utterance \(session.id, privacy: .public) cancelled by deactivate")
+        }
         dropPendingPress(reason: "controller deactivated")
         if let session {
             terminate(session, reason: .aborted)
@@ -260,6 +290,7 @@ final class DictationController {
         }
         hotkey.stop()
         hotkey.key = Settings.shared.pushToTalkKey
+        hotkey.eraseKey = Settings.shared.eraseKey
         let started = hotkey.start()
         Log.hotkey.info(
             "hotkey reloaded to \(self.hotkey.key.displayName, privacy: .public); running: \(started, privacy: .public)"
@@ -288,6 +319,11 @@ final class DictationController {
     private func press(source: UtteranceSource) {
         if let session {
             if session.isTerminating {
+                // The hotkey press queued by an erase restarts it; Record must not replace it.
+                if session.eraseRequested, source == .button {
+                    Log.app.info("Record ignored: utterance \(session.id, privacy: .public) is erasing")
+                    return
+                }
                 // Pressing again right after a release (or after a lost release was
                 // recovered) used to be dropped, so the user talked to nothing.
                 pendingPress = source
@@ -304,7 +340,7 @@ final class DictationController {
         switch state {
         case .idle, .error:
             break
-        case .starting, .listening, .finishing:
+        case .starting, .listening, .finishing, .erasing:
             Log.app.error("press ignored: state \(String(describing: self.state), privacy: .public) without a session")
             return
         }
@@ -347,6 +383,31 @@ final class DictationController {
             return
         }
         terminate(session, reason: .released)
+    }
+
+    // MARK: Erase
+
+    /// The erase key went down while push to talk is held (§6.16). A live hotkey utterance
+    /// is cancelled and its terminal task erases; the hotkey press queued here then restarts
+    /// dictation, unless the key comes up first (release drops a queued press). An utterance
+    /// already ending, with this hold's press queued behind it, erases after its delivery.
+    private func erase() {
+        guard let session, session.source == .hotkey, !session.eraseRequested else {
+            Log.app.info("erase ignored in state \(String(describing: self.state), privacy: .public)")
+            return
+        }
+        if session.isTerminating {
+            guard pendingPress == .hotkey else {
+                Log.app.info("erase ignored: utterance \(session.id, privacy: .public) is ending and no press is queued")
+                return
+            }
+            session.eraseRequested = true
+            Log.app.info("erase queued behind utterance \(session.id, privacy: .public)")
+            return
+        }
+        session.eraseRequested = true
+        pendingPress = .hotkey
+        terminate(session, reason: .erased)
     }
 
     // MARK: Setup task
@@ -665,6 +726,18 @@ final class DictationController {
             endingError = notice
         }
 
+        // 5b. Erase (§6.16), after any delivery and before idle, so the text just delivered
+        // is what gets erased and nothing else owns the target meanwhile. A refusal drops the
+        // restart: typing a replacement for text that was not removed would duplicate it.
+        if session.eraseRequested, session === self.session {
+            state = .erasing
+            let outcome = await eraseBounded(id: session.id)
+            if outcome != .erased {
+                dropPendingPress(reason: "erase did not complete")
+                endingError = outcome.message
+            }
+        }
+
         // 6. Back to idle (or error).
         guard session === self.session else {
             Log.app.error("utterance \(session.id, privacy: .public) was replaced before its terminal task finished")
@@ -673,7 +746,7 @@ final class DictationController {
         self.session = nil
         holdStartedAt = nil
         switch reason {
-        case .released, .tapped, .aborted:
+        case .released, .tapped, .aborted, .erased:
             if let endingError {
                 state = .error(endingError)
                 scheduleErrorReset(endingError, generation: session.id)
@@ -747,6 +820,49 @@ final class DictationController {
             "utterance \(id, privacy: .public) transcript delivery did not finish within \(self.deliveryTimeout, privacy: .public); leaving .finishing to avoid a wedge"
         )
         return nil
+    }
+
+    /// Runs the eraser but never lets it hold `.erasing`. On timeout the token is revoked
+    /// (the eraser stops before its next side effect) and the erase counts as failed.
+    private func eraseBounded(id: Int) async -> EraseOutcome {
+        let token = EraseToken()
+        eraseToken = token
+        defer {
+            if eraseToken === token {
+                eraseToken = nil
+            }
+        }
+        let latch = RaceLatch()
+        let result = OutcomeBox()
+        Task { @MainActor in
+            result.value = await self.eraseLast(token)
+            latch.resolve(true)
+        }
+        let timer = Task { @MainActor in
+            do {
+                try await Task.sleep(for: eraseTimeout)
+            } catch {
+                Log.app.debug("erase timer cancelled")
+                return
+            }
+            latch.resolve(false)
+        }
+        if await latch.value() {
+            timer.cancel()
+            // Revoked by deactivate while it ran: whatever it managed, do not restart.
+            return token.isRevoked ? .failed : result.value
+        }
+        token.revoke()
+        Log.app.error(
+            "utterance \(id, privacy: .public) erase did not finish within \(self.eraseTimeout, privacy: .public); revoked"
+        )
+        return .failed
+    }
+
+    /// Carries the erase outcome out of its unstructured task.
+    @MainActor
+    private final class OutcomeBox {
+        var value: EraseOutcome = .failed
     }
 
     /// Awaits `engine.finish()` but never lets it hang the utterance. If finish does not

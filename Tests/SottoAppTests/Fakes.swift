@@ -94,8 +94,10 @@ func settle(
 @MainActor
 final class FakeHotkey: HotkeySource {
     var key: PushToTalkKey = .rightOption
+    var eraseKey: EraseKey = .rightCommand
     var onPress: (() -> Void)?
     var onRelease: (() -> Void)?
+    var onErase: (() -> Void)?
     var startResult = true
     private(set) var startCalls = 0
     private(set) var stopCalls = 0
@@ -121,6 +123,10 @@ final class FakeHotkey: HotkeySource {
 
     func release() {
         onRelease?()
+    }
+
+    func erase() {
+        onErase?()
     }
 }
 
@@ -359,6 +365,27 @@ final class EngineFactory {
     }
 }
 
+// MARK: - Fake eraser
+
+/// Stands in for `DictationEraser` behind the controller: counts calls, keeps the token, and
+/// parks at `gate` when set so a test can act while the controller is `.erasing`.
+@MainActor
+final class FakeEraser {
+    var outcome: EraseOutcome = .erased
+    var gate: Gate?
+    private(set) var calls = 0
+    private(set) var lastToken: EraseToken?
+
+    func erase(_ token: EraseToken) async -> EraseOutcome {
+        calls += 1
+        lastToken = token
+        if let gate {
+            await gate.pass()
+        }
+        return outcome
+    }
+}
+
 // MARK: - Harness
 
 /// A controller wired to the fakes, plus the record of every final transcript it delivered.
@@ -375,6 +402,18 @@ final class Harness {
     /// When set, every delivery records its text and then parks here, as a slow format or
     /// injection would, so a test can act while the controller awaits the callback.
     var deliveryGate: Gate?
+    let eraser = FakeEraser()
+    /// What the fake eraser reports, and a gate it parks at first when set.
+    var eraseOutcome: EraseOutcome {
+        get { eraser.outcome }
+        set { eraser.outcome = newValue }
+    }
+    var eraseGate: Gate? {
+        get { eraser.gate }
+        set { eraser.gate = newValue }
+    }
+    var eraseCalls: Int { eraser.calls }
+    var lastEraseToken: EraseToken? { eraser.lastToken }
 
     init(
         engines: [FakeEngine] = [],
@@ -384,7 +423,8 @@ final class Harness {
         engineFinishTimeout: Duration = .seconds(2),
         minimumHold: Duration = .zero,
         maxHold: Duration = .seconds(180),
-        deliveryTimeout: Duration = .seconds(10)
+        deliveryTimeout: Duration = .seconds(10),
+        eraseTimeout: Duration = .seconds(3)
     ) {
         let hotkey = FakeHotkey()
         let capture = FakeCapture()
@@ -405,7 +445,11 @@ final class Harness {
             engineFinishTimeout: engineFinishTimeout,
             minimumHold: minimumHold,
             maxHold: maxHold,
-            deliveryTimeout: deliveryTimeout
+            deliveryTimeout: deliveryTimeout,
+            eraseTimeout: eraseTimeout,
+            eraseLast: { [eraser] token in
+                await eraser.erase(token)
+            }
         )
         controller.onFinalTranscript = { [weak self] text, utterance in
             self?.received.append((text: text, utterance: utterance))

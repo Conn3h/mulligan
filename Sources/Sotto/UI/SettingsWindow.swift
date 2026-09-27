@@ -1,8 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// The standard `Settings` scene (⌘,), spec §6.14: push-to-talk key, cleanup, sound, and
-/// permission status. `SwiftUI.Settings` is spelled out where this view is installed, in
+/// The standard `Settings` scene (⌘,), spec §6.14: push-to-talk key, erase key, engine,
+/// cleanup, sound, and permission status. `SwiftUI.Settings` is spelled out where this view is installed, in
 /// `SottoApp`, because the app has its own `Settings` type.
 @MainActor
 struct SettingsWindow: View {
@@ -16,6 +16,7 @@ struct SettingsWindow: View {
         ScrollView {
             VStack(alignment: .leading, spacing: DS.Space.wide) {
                 pushToTalkSection
+                eraseSection
                 engineSection
                 cleanupSection
                 soundSection
@@ -54,6 +55,35 @@ struct SettingsWindow: View {
                     .foregroundStyle(DS.Color.inkTertiary)
             }
         }
+    }
+
+    /// §6.16. The push-to-talk key is left out of the choices; Settings would move it anyway.
+    private var eraseSection: some View {
+        Panel {
+            VStack(alignment: .leading, spacing: DS.Space.base) {
+                SectionHeader(title: "Erase")
+                SegmentedChoice(
+                    options: EraseKey.allCases.filter { !$0.conflicts(with: settings.pushToTalkKey) },
+                    selection: Binding(
+                        get: { settings.eraseKey },
+                        set: { newValue in
+                            settings.eraseKey = newValue
+                            controller.reloadHotkey()
+                        }
+                    )
+                ) { $0.displayName }
+                Text(eraseCaption)
+                    .font(DS.Font.caption)
+                    .foregroundStyle(DS.Color.inkTertiary)
+            }
+        }
+    }
+
+    private var eraseCaption: String {
+        guard settings.eraseKey != .off else {
+            return "Erasing is off."
+        }
+        return "Hold \(settings.pushToTalkKey.displayName) and press \(settings.eraseKey.displayName) to remove your last dictation and say it again."
     }
 
     private var engineSection: some View {

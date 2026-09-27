@@ -27,6 +27,8 @@ enum OrderEvent: String, Sendable, CustomTestStringConvertible {
     case snapshotFailure
     /// Waits past the harness's short `maxHold`.
     case maxHold
+    /// The erase key while push to talk is held (§6.16).
+    case erase
 
     var testDescription: String { rawValue }
 }
@@ -92,6 +94,7 @@ fileprivate extension Harness {
         case .staleInterruption: capture.emitStaleInterruption(interruptionMessage)
         case .snapshotFailure: await factory.made.last?.failStream(TestError("analyzer died"))
         case .maxHold: try await Task.sleep(for: shortMaxHold * 3)
+        case .erase: hotkey.erase()
         }
     }
 
@@ -137,22 +140,23 @@ enum EndingPhase: String, CaseIterable, Sendable {
 
 private let startingEvents: [OrderEvent] = [
     .hotkeyPress, .hotkeyRelease, .lostRelease, .recordButton, .stopButton, .reloadHotkey, .deactivate,
+    .erase,
 ]
 private let listeningEvents: [OrderEvent] = [
     .hotkeyPress, .hotkeyRelease, .hotkeyTap, .lostRelease, .recordButton, .stopButton,
-    .reloadHotkey, .deactivate, .interruption, .snapshotFailure, .maxHold,
+    .reloadHotkey, .deactivate, .interruption, .snapshotFailure, .maxHold, .erase,
 ]
 private let endingEvents: [OrderEvent] = [
     .hotkeyPress, .hotkeyRelease, .hotkeyTap, .lostRelease, .recordButton, .stopButton,
-    .reloadHotkey, .deactivate, .staleInterruption, .snapshotFailure, .maxHold,
+    .reloadHotkey, .deactivate, .staleInterruption, .snapshotFailure, .maxHold, .erase,
 ]
 private let queuedEvents: [OrderEvent] = [
     .hotkeyRelease, .lostRelease, .stopButton, .reloadHotkey, .deactivate, .staleInterruption,
-    .snapshotFailure,
+    .snapshotFailure, .erase,
 ]
 private let restingEvents: [OrderEvent] = [
     .hotkeyPress, .hotkeyRelease, .hotkeyTap, .lostRelease, .recordButton, .stopButton,
-    .reloadHotkey, .deactivate, .staleInterruption,
+    .reloadHotkey, .deactivate, .staleInterruption, .erase,
 ]
 
 @MainActor
@@ -217,6 +221,15 @@ struct DictationOrderTests {
             try await settle("listening") { harness.state == .listening }
             harness.hotkey.release()
             try await harness.expectQuiet(engines: 1, callbacks: 1)
+        case .erase:
+            // Cancelled like a tap; once setup unwinds, the erase runs and the held key
+            // starts a fresh utterance.
+            #expect(harness.state == .starting)
+            await gate.open()
+            try await settle("restarted") { harness.state == .listening }
+            #expect(harness.eraseCalls == 1)
+            harness.hotkey.release()
+            try await harness.expectQuiet(engines: enginesMade + 1, callbacks: 1)
         default:
             Issue.record("no expectation for \(event)")
         }
@@ -285,6 +298,7 @@ struct DictationOrderTests {
         case cancelled
         case failed
         case deliveredThenQueuedStarts
+        case erasedThenRestarts
     }
 
     private func expectedWhileListening(_ event: OrderEvent, _ source: UtteranceSource) -> ListeningOutcome {
@@ -301,6 +315,8 @@ struct DictationOrderTests {
         case (.interruption, _): .deliveredThenMessage
         case (.snapshotFailure, _): .failed
         case (.staleInterruption, _): .ignored
+        case (.erase, .hotkey): .erasedThenRestarts
+        case (.erase, .button): .ignored
         }
     }
 
@@ -342,6 +358,18 @@ struct DictationOrderTests {
             #expect(harness.received.map(\.text) == ["said"])
             harness.hotkey.release()
             try await harness.expectQuiet(engines: 2, callbacks: 2)
+        case .erasedThenRestarts:
+            try await settle("restarted") {
+                harness.state == .listening && harness.factory.made.count == 2
+            }
+            #expect(harness.eraseCalls == 1)
+            #expect(harness.received.isEmpty)
+            #expect(await engine.finishCalls == 0)
+            harness.hotkey.release()
+            try await harness.expectQuiet(engines: 2, callbacks: 1)
+        }
+        if expectedWhileListening(event, source) == .ignored {
+            #expect(harness.eraseCalls == 0)
         }
     }
 
@@ -389,6 +417,8 @@ struct DictationOrderTests {
             #expect(text == (event == .snapshotFailure && phase == .finishing ? "sa" : "said"))
         }
         #expect(harness.hotkey.isRunning == (event != .deactivate))
+        // Ending with no press queued, the key is not held: an erase cannot apply.
+        #expect(harness.eraseCalls == 0)
     }
 
     // MARK: Queued press
@@ -419,6 +449,13 @@ struct DictationOrderTests {
             try await harness.expectQuiet(engines: 1, callbacks: 1)
         case .lostRelease, .staleInterruption, .snapshotFailure:
             try await settle("queued press listening") { harness.state == .listening }
+            harness.hotkey.release()
+            try await harness.expectQuiet(engines: 2, callbacks: 2)
+        case .erase:
+            // Erases what the ending utterance delivered, then the queued press restarts.
+            try await settle("queued press listening") { harness.state == .listening }
+            #expect(harness.eraseCalls == 1)
+            #expect(harness.received.map(\.text) == ["said"])
             harness.hotkey.release()
             try await harness.expectQuiet(engines: 2, callbacks: 2)
         default:
@@ -518,10 +555,53 @@ struct DictationOrderTests {
             try await Task.sleep(for: .milliseconds(30))
             #expect(harness.state == resting)
             try await harness.expectQuiet(engines: 1, callbacks: 1)
+            #expect(harness.eraseCalls == 0)
         }
     }
 
     // MARK: Two-event sequences
+
+    @Test func eraseThenAnImmediateReleaseErasesWithoutRestarting() async throws {
+        let harness = Harness.cell(.erase)
+        try await harness.start(.hotkey)
+        harness.hotkey.erase()
+        harness.hotkey.release()
+        try await harness.expectQuiet(engines: 1, callbacks: 0)
+        #expect(harness.eraseCalls == 1)
+    }
+
+    @Test func aSecondEraseInTheSameHoldIsIgnored() async throws {
+        let harness = Harness.cell(.erase)
+        harness.eraseGate = Gate(open: false)
+        try await harness.start(.hotkey)
+        harness.hotkey.erase()
+        await harness.eraseGate?.waitForArrival()
+        harness.hotkey.erase()
+        await harness.eraseGate?.open()
+        try await settle("restarted") { harness.state == .listening && harness.factory.made.count == 2 }
+        #expect(harness.eraseCalls == 1)
+        harness.hotkey.release()
+        try await harness.expectQuiet(engines: 2, callbacks: 1)
+    }
+
+    @Test func eraseAfterAQueuedPressWhoseDeliveryShowedANotice() async throws {
+        let gate = Gate(open: false)
+        let harness = Harness.cell(.erase)
+        harness.deliveryGate = gate
+        harness.deliveryNotice = "Not typed."
+        harness.eraseOutcome = .notTyped
+        try await harness.start(.hotkey)
+        harness.hotkey.release()
+        await gate.waitForArrival()
+        harness.hotkey.press()
+        harness.hotkey.erase()
+        await gate.open()
+        // The erase refuses; its message wins over the delivery's, and nothing restarts.
+        try await settle("erase message") { harness.state == .error(EraseOutcome.notTyped.message!) }
+        #expect(harness.factory.made.count == 1)
+        harness.hotkey.release()
+        try await harness.expectQuiet(engines: 1, callbacks: 1)
+    }
 
     @Test func interruptionThenReleaseShowsTheMessageOnce() async throws {
         let harness = Harness.cell(.interruption)

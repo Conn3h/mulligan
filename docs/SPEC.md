@@ -12,7 +12,9 @@ v1.0 drafted 2026-09-01; v1.1 the same day after an adversarial review
 (`docs/reviews/2026-09-01-codex-spec-review.md`), which reshaped §6.5–6.8 around
 per-utterance generations, single-flight termination, and injectable dependencies;
 v1.2 (2026-09-02) records the implementation deviations accepted from batches A and B,
-marked "as built" below.
+marked "as built" below; v1.3 (2026-09-27) adds erase last dictation (§6.16), a
+configurable erase key, and keeps context corrections out of Parakeet's bias list (§6.6a),
+revised the same day after two reviews (`docs/reviews/2026-09-27-erase-spec-*.md`).
 
 ---
 
@@ -142,6 +144,8 @@ with what was being attempted.
     var cleanupEnabled: Bool             // default true
     var smartCleanup: Bool               // default false (Foundation Model cleanup)
     var soundEnabled: Bool               // default true
+    var speechEngine: SpeechEngineChoice // default .apple (§6.6a)
+    var eraseKey: EraseKey               // default .rightCommand (§6.16)
 }
 ```
 
@@ -178,8 +182,10 @@ enum PushToTalkKey: String, CaseIterable, Sendable {
 /// The seam the controller depends on, so tests can drive presses without a CGEventTap.
 @MainActor protocol HotkeySource: AnyObject {
     var key: PushToTalkKey { get set }
+    var eraseKey: EraseKey { get set }         // §6.16
     var onPress: (() -> Void)? { get set }
     var onRelease: (() -> Void)? { get set }
+    var onErase: (() -> Void)? { get set }     // the erase key went down while `key` is held
     @discardableResult func start() -> Bool   // false when the tap cannot be created (no Accessibility)
     func stop()
 }
@@ -222,6 +228,8 @@ Behaviour:
   loop. Extract plain values (`keyCode`, `flags`, `type`) from the `CGEvent` first, then
   cross into the main actor. `MainActor.assumeIsolated` is permitted **here only**, with a
   comment saying why; nowhere else in the app.
+- The erase key (§6.16) is always a modifier and is handled in this same `.flagsChanged`
+  tap, so there is still one tap and one `assumeIsolated` site.
 - `stop()` disables the tap, removes the run loop source, and resets `isPressed` **without
   emitting a release**; the controller is responsible for ending any utterance before it
   stops or reloads the monitor (§6.7).
@@ -435,6 +443,13 @@ Behaviour:
   drain (the library never ends its update stream), yields the final snapshot, and releases.
 - `cancel()` cancels the manager, the drain, finishes the stream with `CancellationError`,
   and releases; the same phase machine and idempotence rules as `AppleSpeechEngine`.
+- Parakeet is biased with `DictionaryStore.vocabularyPhrases` (§6.11): `biasPhrases`
+  without the `write` side of **context corrections**. Vocabulary boosting rewrites heard
+  spans toward every phrase it is given, so `security code` or `Claude session` would become
+  one more thing to over-fire on; context corrections exist to *undo* over-fires and must not
+  feed them. Every other entry keeps its boost, so a dictionary made only of ordinary
+  corrections (`clawed -> Claude`, `codex -> Codex`) loses nothing. Apple's engine keeps
+  `biasPhrases`, where contextual strings only raise odds.
 - Bias phrases are applied as FluidAudio vocabulary boosting: `ParakeetModels` also loads the
   separate CTC 110M encoder (`CtcModels.downloadAndLoad()`), and `start()` calls
   `configureVocabularyBoosting` with one `CustomVocabularyTerm` per phrase before streaming
@@ -468,8 +483,8 @@ struct Utterance: Sendable {
 
 @MainActor @Observable final class DictationController {
     enum State: Equatable {
-        case idle, starting, listening, finishing, error(String)
-        var isActive: Bool        // starting | listening | finishing
+        case idle, starting, listening, finishing, erasing, error(String)
+        var isActive: Bool        // starting | listening | finishing | erasing
         var showsHUD: Bool        // isActive || error
     }
     private(set) var state: State
@@ -485,7 +500,9 @@ struct Utterance: Sendable {
          engineFinishTimeout: Duration = .seconds(2),   // cap on engine.finish() in the terminal path
          minimumHold: Duration = .milliseconds(250),    // a shorter release is a mis-tap: cancel, don't finalize
          maxHold: Duration = .seconds(180),             // cap on .listening: a stuck recording ends as a release
-         deliveryTimeout: Duration = .seconds(10))      // cap on onFinalTranscript so a hung pipeline cannot wedge .finishing
+         deliveryTimeout: Duration = .seconds(10),      // cap on onFinalTranscript so a hung pipeline cannot wedge .finishing
+         eraseTimeout: Duration = .seconds(3),          // cap on eraseLast so a stuck target cannot wedge .erasing
+         eraseLast: @escaping @MainActor (EraseToken) async -> EraseOutcome = { _ in .nothingToErase })   // §6.16
 
     /// Receives the final raw transcript once per utterance. Awaited before returning to idle.
     /// A returned message (the text was recorded but not typed) is shown as the ending error.
@@ -934,6 +951,8 @@ public struct DictionaryCorrector: Sendable {
     public func apply(to text: String) -> (text: String, applied: [AppliedCorrection])
     public static let biasLimit: Int   // 100
     public static func biasPhrases(from entries: [DictionaryEntry]) -> [String]
+    public static func vocabularyPhrases(from entries: [DictionaryEntry]) -> [String]
+    public static func isContextCorrection(_ entry: DictionaryEntry) -> Bool
 }
 
 public struct DictionaryWarning: Identifiable, Sendable, Equatable {
@@ -994,6 +1013,21 @@ per-project vocabulary fits without silently dropping terms. Still bounded on pu
 unbounded context list makes speech models drift and invent primed words on quiet audio,
 which is worse than the misspelling it was meant to fix.
 
+`isContextCorrection`: a `.correction` whose `hear` and `write` each have at least two
+words and share at least one word, compared case-insensitively after splitting on spaces
+and hyphens (`security codex -> security code`, `cloud session -> Claude session`). A
+single-word correction, a pure recasing, and a two-word fix sharing no word
+(`clawed -> Claude`, `codex -> Codex`, `burr cell -> Vercel`) are not.
+`vocabularyPhrases`: exactly `biasPhrases` (same trimming, de-duplication, order and cap)
+computed over the entries that are not context corrections. Tests cover each example above,
+that a context correction's target still boosts when a term or another correction also names
+it, and that the order, de-duplication and cap match `biasPhrases`.
+
+**Context corrections** need no new mechanism: leftmost-longest already lets a longer
+trigger beat a shorter one, so `security codex -> security code` wins over `codex -> Codex`
+inside "security Codex", and a plain "codex" is still corrected. They live in the user's
+dictionary, not in code; a vector in `vectors.json` pins the behaviour.
+
 `DictionaryWarning.check` (only corrections can misfire; terms return `[]`). Exact
 messages, so the UI and tests agree:
 
@@ -1030,6 +1064,7 @@ implementation starts; do not edit it (report if you believe a vector is wrong).
     func filtered(by query: String) -> [DictionaryEntry]   // localizedStandardContains on both sides
     var corrector: DictionaryCorrector           // rebuilt on demand; cheap
     var biasPhrases: [String]
+    var vocabularyPhrases: [String]              // §6.11; Parakeet's bias list
 }
 ```
 
@@ -1127,7 +1162,8 @@ Content: a `hudBarCount`-bar level meter (each bar with a fixed phase offset so 
 ripples rather than pumps; bars rest at `hudBarFloor` when inactive; animation phase lives
 in a plain reference type the view holds, never in `@State` mutated from a draw closure)
 and the live transcript, two lines, head-truncated, or "Preparing…" while `.starting`,
-"Listening…" while `.listening` with an empty transcript, "Transcribing…" while
+"Listening…" while `.listening` with an empty transcript, "Erasing…" while `.erasing`
+(§6.16), "Transcribing…" while
 `.finishing` with an empty transcript, or the error message in the accent colour. Hosted
 with `NSHostingView`.
 
@@ -1148,14 +1184,18 @@ adding. File menu: "Reveal Dictionary File" and "Reload Dictionary".
 
 **Settings** — `UI/SettingsWindow.swift`, the standard `Settings` scene (⌘,). Sections:
 Push to talk (segmented choice of the three keys; changing it calls
-`controller.reloadHotkey()`), Cleanup (toggle; when on, a Smart cleanup toggle disabled with
+`controller.reloadHotkey()`), Erase (segmented choice over the `EraseKey` cases that do not conflict with the push-to-talk
+key, §6.16; changing it
+also calls `controller.reloadHotkey()`; caption "Hold ⟨key⟩ and press ⟨erase key⟩ to remove
+your last dictation and say it again.", or "Erasing is off." when off), Cleanup (toggle; when on, a Smart cleanup toggle disabled with
 the `unavailableReason` shown when the Foundation Model is unavailable), Sound (toggle), and
 a Permissions section showing Accessibility and Microphone status with "Open System
 Settings" buttons when either is missing. Fully qualify `SwiftUI.Settings` because the app
 has its own `Settings` type.
 
 **Menu bar** — `UI/MenuBarContent.swift`: icon `waveform` / `waveform.circle.fill` when
-active; "Hold ⟨key⟩ to dictate"; Open Sotto; Settings…; Grant Accessibility… / Grant
+active; "Hold ⟨key⟩ to dictate"; unless the erase key is off, a second disabled line
+"⟨key⟩ + ⟨erase key⟩ erases the last one"; Open Sotto; Settings…; Grant Accessibility… / Grant
 Microphone… when missing; Quit.
 
 ### 6.15 App lifecycle — `App/SottoApp.swift`, `App/AppComposition.swift`
@@ -1189,6 +1229,312 @@ app activation (as built: the `applicationDidBecomeActive` delegate method) to c
 Batch A1 creates `AppComposition` with the controller wired to real dependencies and
 `onFinalTranscript` set to a closure that logs the transcript length; B1 replaces that
 closure with the pipeline; B2 adds the HUD; C1 adds the scenes.
+
+### 6.16 Erase last dictation — `Core/DictationEraser.swift`, `Core/ErasePlan.swift`, `Core/EraseKey.swift`
+
+Reviewed 2026-09-27 by Codex and an independent reviewer
+(`docs/reviews/2026-09-27-erase-spec-*.md`); this is the revision that answers both.
+
+**What the user does.** Hold the push-to-talk key and tap the erase key: by default the other
+right-hand modifier, Right ⌘ next to Right ⌥, so the whole gesture stays under one hand. The
+text Sotto last typed disappears, the start sound plays, and Sotto is listening again, so the
+user keeps holding and says it again. Releasing right after the tap only erases. Whatever was
+said in the same hold before the tap is thrown away. Pressing the two keys in either order
+works (erase key first, then push to talk, also erases).
+
+**The safety rule.** Erase removes exactly what Sotto typed, from the same field it typed it
+into, and only when that is proven by reading the text back, or, where the app cannot be
+read, when nothing that could have moved the caret has happened since. When in doubt it does
+nothing and the HUD says why. A refused erase costs the user a few keystrokes; a wrong one
+destroys their text.
+
+```swift
+enum EraseKey: String, CaseIterable, Sendable {
+    case rightCommand, rightOption, off
+    var keyCode: Int64?          // 54, 61, nil
+    var flag: CGEventFlags?      // device bits 0x10, 0x40, nil (the same bits PushToTalkKey uses)
+    var displayName: String      // "Right ⌘", "Right ⌥", "Off"
+    func conflicts(with key: PushToTalkKey) -> Bool
+}
+
+enum EraseOutcome: Sendable, Equatable {
+    case erased
+    case nothingToErase     // "Nothing to erase."
+    case notTyped           // "The last dictation wasn't typed; nothing was erased."
+    case inputSince         // "You've typed, clicked or switched since; nothing was erased."
+    case textChanged        // "The text before the cursor changed; nothing was erased."
+    case tooLongToVerify    // "That dictation is too long or has line breaks, so it can't be erased safely here."
+    case interrupted        // "Erasing stopped part-way because you typed or switched; check the text."
+    case failed             // "Couldn't erase; nothing was changed."
+    var message: String?    // nil for .erased
+}
+
+/// What was last typed, captured by TextInjector at the moment the insert was confirmed.
+struct TypedDictation: Sendable {
+    let text: String             // exactly as delivered, including any leading space Sotto added
+    let processID: pid_t         // captured before the insert began, not after
+    let element: AXElementID?    // the focused element, when readable (CFEqual identity, see below)
+    let window: AXElementID?     // the app's focused window, when readable
+    let caretEnd: Int?           // UTF-16 caret location after the insert, when readable
+    let landedAt: ContinuousClock.Instant
+    let previousInjection: LastInjectionSnapshot?   // TextInjector's run-on state before this insert, restored on erase
+    var inputEpoch: UInt64       // the monitor's epoch when it landed
+}
+```
+
+`AXElementID` is a small `@unchecked Sendable` box around an `AXUIElement` whose equality is
+`CFEqual`; it never leaves the main actor in practice and is compared, never messaged, off it.
+
+**Input epoch.** `DictationEraser.start()` (called from `applicationDidFinishLaunching` after
+the controller activates) installs one passive `NSEvent.addGlobalMonitorForEvents(matching:
+[.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel])` and observes
+`NSWorkspace.didActivateApplicationNotification` and `activeSpaceDidChangeNotification`.
+Each bumps `inputEpoch`. A global monitor is passive: it cannot delay anyone's typing, and
+AppKit does not deliver the app's own events to it; events Sotto posts to other apps still
+arrive, so they carry `SyntheticEvent.marker` (a fixed 64-bit value in `.eventSourceUserData`,
+set on the ⌘V events and every key this section posts) and do not bump the epoch. Accessibility
+covers global keyboard monitoring (Apple DTS); if the monitor cannot be installed, that is
+logged and the epoch is treated as always changed, so the unreadable path always refuses
+(fail closed). The monitor looks only at event type and the marker field, never at key codes
+or characters, and logs nothing per event.
+
+**Recording.** Every hotkey delivery first marks the current record superseded (at the top of
+`UtterancePipeline.process`, before formatting), so an erase that arrives while a delivery is
+formatting, typing, or ended without typing (`.failed`, `.focusMoved`, a delivery abandoned by
+`deliveryTimeout`) refuses with `.notTyped` rather than erasing the dictation before it.
+`TextInjector` captures the frontmost pid, the focused element and window **before** it
+mutates anything, and on a confirmed `.landed` calls `DictationEraser.recordTyped` with them,
+the delivered string, the caret after the insert (AX path: the verified end; paste path: read
+once after the paste completes, below), `landedAt`, the epoch, and a snapshot of
+`lastInjection` from before this insert. If the input epoch moved while the text was landing
+(a click during a paste's settle), or the input monitor is not running at all, the focus and
+caret read now may belong to other text, so the record is kept without element, window and
+caret; the unchanged-input rule then refuses it. Each record also carries its delivery's
+generation: `supersede()` bumps and returns it at the start of the delivery, and the pipeline
+hands it through to `TextInjector.insert`, so a delivery that resumes late (after
+`deliveryTimeout`) keeps its own. Only a record of the current generation clears
+`superseded`, so an older delivery landing after a newer one began cannot make itself
+erasable again. One
+level only: a new landing replaces the record, and any erase attempt that gets past the
+"nothing to erase" check clears it, whatever the outcome.
+
+**One mutation at a time.** `TextInjector.insert` and `DictationEraser.eraseLast` run on one
+serial lane (a chained main-actor task held by `TextInjector`): each awaits the previous
+mutation, including a paste's `pasteCompletionDelay`, before touching the target. An erase
+therefore never overtakes a paste still being applied, and a new insert never races an erase.
+The lane is not held across pasteboard restores (they touch only the pasteboard). A paste's
+record is written only when its `pasteCompletionDelay` has passed, which is the same assumption
+the pasteboard restore already rests on: if the target had not taken the paste by then, the
+restore would already have broken it.
+
+**Terminals** (`Core/TerminalApps.swift`, by bundle id: Ghostty, Terminal, iTerm2, WezTerm,
+kitty, Alacritty, Warp) expose their whole screen buffer through Accessibility, not the line
+being edited, so the screen's text can never prove anything. `TextInjector.focusedTarget()`
+marks a terminal app's focused element as a **screen** unless its role is a real text field
+(`AXTextField`, `AXComboBox`: a search or rename box reads back like any other field). A
+screen keeps its element and window identity (records carry `textProvable = false`; read-back
+is `ReadBack.screen`, whose text and selection are never used), so erase takes the unverified
+path with identity checks. Found in acceptance (2026-09-27): Ghostty's text read back as the
+screen and every erase refused; Codex round 4 then showed that marking whole apps unreadable
+also stripped the protections from their real text fields.
+
+**Plan** (`ErasePlan.decide`, pure and unit-tested; inputs are the record, `superseded`, the
+current epoch, the frontmost pid, and a `ReadBack` taken just now):
+
+```swift
+enum ReadBack: Equatable {
+    case unreadable(window: AXElementID?)             // no readable text; the window when AX can still name it
+    case readable(element: AXElementID, window: AXElementID?, selection: CFRange, preceding: String?)
+        // `preceding`: the record's UTF-16 length of text ending at selection.location + selection.length,
+        // nil when that range is out of bounds
+}
+enum ErasePlan: Equatable {
+    case refuse(EraseOutcome)
+    case deleteRange(location: Int, length: Int)      // readable, proven
+    case backspaces(count: Int)                        // unreadable, inferred; count in Characters
+}
+```
+
+1. No record → `.refuse(.nothingToErase)`; superseded → `.refuse(.notTyped)`.
+2. Frontmost pid differs → `.refuse(.inputSince)`.
+3. `.readable`: the element must equal the recorded element and the recorded caret must be
+   known; the selection must be either a caret at `caretEnd` or exactly the inserted range
+   (some apps leave the insertion selected); `preceding` must equal `record.text` exactly,
+   UTF-16 unit for unit (no normalisation: an app that normalised the text has changed it;
+   Swift's `==` on `String` compares canonically, so compare `utf16` views).
+   All true → `.deleteRange(caretEnd - n, n)`, `n` = `record.text.utf16.count`; otherwise
+   `.refuse(.textChanged)` (a different element or window counts as `.inputSince`). The
+   epoch is not consulted: read-back is proof, the epoch is inference. The element check is
+   what stops identical text in another field ("Yes.") from being erased.
+   A record that has an element is only ever erased this way: if the target is unreadable
+   now (focus moved) → `.refuse(.inputSince)`; if the record has no `caretEnd` →
+   `.refuse(.textChanged)`.
+4. A record captured without an element (the target was unreadable when it was typed), or a
+   terminal screen's: the recorded element, when there is one, must be the focused one, and
+   the recorded window, when there is one, must be the one in front (a window that cannot be
+   read now fails closed; `ErasePlan.identityHolds`); the epoch must equal `record.inputEpoch`, else `.refuse(.inputSince)`; the
+   focused window, when AX can name it, must equal the recorded one, else `.inputSince`; the
+   text must hold no newline and at most `unverifiedEraseLimit` Characters (500, see §10),
+   else `.refuse(.tooLongToVerify)`;
+   when the target is readable now after all, the selection must be a caret and `preceding`
+   must still equal `record.text`, else `.refuse(.textChanged)`; then `.backspaces(record.text.count)`.
+
+**Executing.** All AX calls in this section and in `TextInjector` run under a process-wide
+`AXUIElementSetMessagingTimeout` of 1 s, set once at launch on the system-wide element (the
+default is about 6 s, which would freeze the main actor, the event tap and the controller's
+timers). Not shorter: the insert path shares it, and an AX write that times out on Sotto's
+side but still lands in a slow app would fall back to a paste and type the text twice.
+
+The eraser plans once (a refusal returns at once), then waits until the erase modifier is
+physically up (`CGEventSource.keyState` by keycode, bounded to 1 s; still down at the bound →
+`.failed`, nothing posted), so no posted key can be read together with a held Command, and
+then **plans again from a fresh read**: the user may have moved the caret during the wait.
+Push to talk is still down, so every posted key is built from a `.privateState` source with
+its flags set explicitly to empty, and right before every post (the fallback backspace and
+each burst) the erase modifier is checked again: pressed again meanwhile (a modifier change
+the input monitor does not see), the erase stops.
+
+- `.deleteRange`: first try AX alone: set `kAXSelectedTextRangeAttribute` to the range, read
+  it back, and require it to equal the range exactly. A field that reads but will not take a
+  selection is handled by what it says about itself. One whose selection attribute is not
+  settable gets **checked backspaces** (no selection is ever requested, so none can land
+  mid-run): one key at a time, each proven first (focused element ours, caret collapsed exactly
+  after the remaining dictation, the text before it exactly that remainder, no input, same
+  app, erase modifier up) and each verified afterwards (the caret moved back by the burst
+  within 500 ms); any mismatch stops the run. One that is settable but refuses: the ChatGPT app
+  (acceptance, 2026-09-27) reports failure and then applies it a moment later, so the eraser
+  waits 200 ms and uses a selection that has landed exactly; if none lands it refuses
+  (`.failed`), because a pending request could still land during backspaces and turn one into
+  a deletion of the selection and more. Before any selection is deleted, the same
+  `isStillOurSelection` check as the fallback backspace runs (text may have shifted during
+  the wait). Once the selection took: then set `kAXSelectedTextAttribute` to
+  `""` and poll (up to 500 ms; the ChatGPT app shows a deletion slowly) for the caret at
+  `location` with the length shrunk by
+  `n`. If the write did not verify, post one backspace (which deletes only the selection) and
+  poll again, but only after checking, right before posting, that the same app is in front,
+  the input epoch has not moved, and a fresh read shows the recorded element focused with its
+  selection exactly the range and its text exactly the record: the backspace goes to
+  whatever has focus, not to the element. Any read-back that does
+  not match exactly → stop and return `.failed` (logged with both ranges); once the backspace
+  has gone out, an unverified result is `.interrupted` ("check the text"), never "nothing was
+  changed". There is no
+  counted-backspace fallback on a readable target.
+- `.backspaces(count)`: post key-down/key-up pairs of kVK_Delete (marked, empty flags) in
+  chunks of 10, yielding 2 ms between chunks. Before each chunk, re-check the epoch and the
+  frontmost pid against the record's, the erase modifier, and `identityHolds` on a fresh read
+  (a terminal pane or window can change without input); a change stops the run with `.interrupted`. Posting
+  reports how many keys it actually managed; a shortfall stops the run (`.interrupted`, or
+  `.failed` when nothing was posted), so a failed event creation is never reported as
+  erased. Log the count posted, not the text.
+
+The erase honours a cancellation token: the controller revokes it on `eraseTimeout`,
+`deactivate()`, or quit, and the eraser checks it before every AX write and every chunk, so an
+abandoned erase stops before its next side effect instead of running on behind a new
+dictation. On `.erased`, `TextInjector.lastInjection` is put back to the record's
+`previousInjection`, so the restated text does not get the run-on leading space meant for the
+erased one.
+
+**Hotkey.** The erase key is a modifier, so it is handled in the existing `.flagsChanged` tap;
+there is no second tap and no key-down handling. `HotkeySource.eraseKey` is set by the
+controller in `activate()` and `reloadHotkey()` from `Settings`.
+
+- A `.flagsChanged` whose keycode is the erase key's with its device bit set, while
+  `isPressed` is true **and** `isKeyDown(key)` confirms push to talk is physically down (a stale
+  `isPressed` must not turn every Right ⌘ into an erase): fire `onErase`, swallow it, and set
+  `eraseModifierSwallowed = true`.
+- The erase key's up while `eraseModifierSwallowed` is true is swallowed, whether or not push
+  to talk is still held, so the target never sees an up without its down; this clears the
+  flag. A down that passes through (push to talk not held) also clears the flag, so a lost up
+  can never cause a later ordinary ⌘ up to be eaten and ⌘ to stick in the target.
+- Push to talk going down while the erase key is already physically down (the other order)
+  fires `onPress` then `onErase`. The erase key's down already reached the target, so its up
+  is passed through too.
+- On `.tapDisabledByTimeout` / `.tapDisabledByUserInput`, reconciliation covers both keys:
+  if `eraseModifierSwallowed` and the erase key is no longer down, clear the flag (its up was
+  lost; nothing to swallow).
+- `off` does nothing extra. The one callback and its single `assumeIsolated` are unchanged.
+
+**Controller.** Erase is one more terminal outcome, run by the session's own terminal task,
+so there is never a gap in which nothing owns it.
+
+- `onErase` with a live hotkey session that is not terminating: set `pendingPress = .hotkey`
+  and `terminate(session, reason: .erased)`. `.erased` behaves like `.tapped` (engine
+  cancelled, no callback, never `.finishing`) except that after the engine is ended the task
+  sets `.erasing`, awaits `eraseLast()` bounded by `eraseTimeout` (3 s; a timeout revokes the
+  eraser's token and counts as `.failed`), and only then returns to idle.
+- `onErase` while the hotkey session is terminating after a release (the previous utterance
+  is still delivering and this press is queued): set `session.eraseAfterDelivery = true`; the
+  terminal task runs the erase after delivery and before idle, so the text it just delivered
+  is what gets erased, or the erase refuses with `.notTyped` if it was not typed.
+- Any other state (no session, a `.button` session, `.error`, an erase already requested) →
+  ignored, logged.
+- After the erase: `.erased` → idle, and the queued `pendingPress` starts a fresh hotkey
+  utterance (new generation, start sound). Any other outcome → drop `pendingPress` and show
+  `.error(outcome.message)`, which auto-clears after `errorDisplayDuration`; no restart,
+  because typing a replacement for text that was not removed would duplicate it.
+- Release, `reloadHotkey()` and `deactivate()` already drop a pending hotkey press, so a
+  release during `.erasing` means "erase only". `deactivate()` also revokes the eraser's
+  token, and clears an erase requested on an utterance still unwinding, so it never starts.
+  A Record-button press during `.erasing` is ignored like any press during a terminating
+  session that is not the hotkey's.
+- HUD text for `.erasing`: "Erasing…".
+
+**Settings.** `Settings.eraseKey` (default `.rightCommand`). The erase key can never be the
+push-to-talk key: the Settings picker leaves the conflicting option out; setting
+`pushToTalkKey` to a conflicting key moves `eraseKey` to the other right-hand modifier (Right ⌥
+push to talk ↔ Right ⌘ erase); fn keeps whatever it had. `init` repairs a conflicting stored
+pair explicitly (property observers do not run in an initialiser) and persists the repair.
+
+**Spike before building** (by hand, with the user, about 15 minutes; it decides details, not
+the design): with a throwaway build, hold Right ⌥ and tap Right ⌘ in TextEdit, Terminal,
+Ghostty or iTerm2, VS Code or Cursor, Chrome, and Claude Code, and log the `.flagsChanged`
+sequence to confirm the chord arrives as specified on macOS 26. Post marked backspaces while
+Right ⌥ is still held, and confirm each app deletes one character, not a word. (Done
+2026-09-27: the user confirmed both. The paste-collapse thresholds were read from the tools
+themselves, §10.) Check which of those apps are
+readable (element, selection and preceding text all available).
+
+**Tests** (written first):
+
+- `ErasePlanTests`: every rule in order, each as its own case: no record; superseded; other
+  pid; readable same element with a caret match; a selection-equals-insert match; a leading
+  space Sotto added; different text; an NFC/NFD pair (refused, no normalisation); identical
+  text in a different element ("Yes." erased nowhere else); a different window; a caret not at
+  `caretEnd`; `preceding` nil at a field start; unreadable with epoch unchanged, epoch
+  changed, window changed, a newline, 500 and 501 Characters; an emoji record (backspaces in
+  Characters, range in UTF-16 units).
+- `DictationEraserTests` (monitor feed, AX reads and writes, key posting and the clock behind
+  injectable seams): a landing records; user input, clicks, scrolls, app and Space switches
+  bump the epoch; marked events do not; a delivery start supersedes; an attempt clears the
+  record; `.deleteRange` stops on any read-back mismatch and never falls back to counted
+  backspaces; `.backspaces` stops with `.interrupted` when the epoch changes mid-run; a
+  revoked token stops before the next side effect; keys wait for the erase modifier's up;
+  `lastInjection` is restored on `.erased`; an insert queued behind an erase waits for it;
+  an erase queued behind a paste waits for `pasteCompletionDelay`.
+- `SettingsTests`: default pair; switching push to talk moves the erase key and back; fn
+  keeps it; a conflicting stored pair is repaired and persisted by `init`.
+- `HotkeyMonitorTests`: erase down while push to talk is held and physically down fires once
+  and is swallowed; its up is swallowed, also after push to talk was released; erase down
+  while push to talk is not held passes and clears the flag; a stale `isPressed` with push to
+  talk physically up does not fire; the reverse order fires press then erase and passes the
+  erase key's up; tap-disabled reconciliation clears a lost erase up; `stop()` resets.
+- `DictationControllerTests` and the `DictationOrderTests` matrix gain the erase event and
+  `.erasing`: erase while starting at each setup suspension point and while listening →
+  engine cancelled, no callback, eraser awaited, restart when still held, none after a
+  release during `.erasing`; erase queued behind a delivering utterance → runs after
+  delivery; erase after a delivery that ended `.failed`, `.focusMoved` or by
+  `deliveryTimeout` → `.notTyped`, no restart; each failure outcome → its message, no
+  restart; `eraseTimeout` → token revoked, `.failed`; a new press while a timed-out eraser
+  is still running; Record, reload and deactivate during `.erasing`; erase from a button
+  session, idle and error → ignored. Every cell keeps the existing invariants (at most one
+  callback, no live tasks at idle, every engine ended).
+
+**Acceptance** (by hand, with the user): in each app from the spike, dictate, erase and
+restate, and confirm only the dictation changed and no leading space appeared; type one
+character after a dictation and confirm the erase refuses; click elsewhere in the same field
+and confirm it refuses; dictate "Yes." into two fields and erase from the other one, confirm
+it refuses; switch apps or Spaces and back, confirm it refuses; a terminal dictation over the
+limit refuses; release during "Erasing…" erases without restarting.
 
 ## 7. Build, signing, permissions
 
@@ -1273,10 +1619,32 @@ Things that look wrong and are not, or look fine and will bite:
 - Mutating `@State` inside a `Canvas` or `TimelineView` draw closure floods the log; keep
   animation physics in a plain reference type the view holds.
 - Never build inside an iCloud-synced folder; the Makefile's scratch path exists for this.
+- A swallowed erase modifier must also have its up swallowed, even after push to talk is
+  released, or apps see a Command or Option up with no down (§6.16).
+- Sotto's own ⌘V and backspaces reach the global input monitor; mark them with
+  `SyntheticEvent.marker` or the first backspace of an erase invalidates the record it is
+  erasing (§6.16).
+- A long or multi-line paste into Claude Code collapses into a "[Pasted text]" placeholder
+  that one backspace deletes whole; counted backspaces would then eat older text. Hence the
+  unverified erase limit (§6.16). Measured 2026-09-27: Claude Code 2.1.283 keeps a paste
+  inline up to 800 characters with at most 2 line breaks and collapses anything larger;
+  Codex CLI 0.154 collapses above 1000 characters (`LARGE_PASTE_CHAR_THRESHOLD`). The limit
+  is 500 single-line Characters, well under both. Recheck when either tool changes.
+- `⌘V` returns before the target has applied the paste. Anything that acts on the pasted
+  text (erase) must wait out `pasteCompletionDelay` on the mutation lane (§6.16).
+- Synchronous AX calls block the main actor, the event tap and every timer for up to about
+  6 s on a hung target; set `AXUIElementSetMessagingTimeout` (§6.16), but not so short that
+  a slow app's insert times out on Sotto's side and is pasted a second time.
+- Matching text is not identity: "Yes." before the caret in another field is not Sotto's.
+  Compare the focused element with `CFEqual` (§6.16).
 
 ## 11. Later
 
 Parakeet via CoreML as a second engine (the seam exists), command mode on selected text,
 first-run onboarding, notarization and a DMG, an app icon, live dictionary file watching
 done properly (content fingerprints, debounce), a common-word warning list for the
-dictionary, per-app injection preferences.
+dictionary, per-app injection preferences, a multi-level erase history, more push-to-talk
+keys. Evaluated and declined (2026-09-27): a decision model (Convai's Laya) choosing between
+a heard word and a dictionary term. Zero-shot it scored 57-62% on 93 labelled slots from real
+history against 73% for the dictionary alone; speed was fine (about 31 ms per question on
+the GPU). Context corrections (§6.11) cover the misses it was meant for.

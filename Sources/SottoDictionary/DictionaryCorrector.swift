@@ -124,6 +124,28 @@ public struct DictionaryCorrector: Sendable {
         return result
     }
 
+    /// A correction that fixes a word only in the company of another: both sides have at
+    /// least two words and share one ("security codex -> security code"). Its target must not
+    /// feed vocabulary boosting, which would push the engine toward the phrase it exists to undo.
+    public static func isContextCorrection(_ entry: DictionaryEntry) -> Bool {
+        guard entry.kind == .correction else { return false }
+        let hearWords = words(entry.hear)
+        let writeWords = words(entry.write)
+        guard hearWords.count >= 2, writeWords.count >= 2 else { return false }
+        return !Set(hearWords).isDisjoint(with: writeWords)
+    }
+
+    /// `biasPhrases` over every entry that is not a context correction: Parakeet's list.
+    public static func vocabularyPhrases(from entries: [DictionaryEntry]) -> [String] {
+        biasPhrases(from: entries.filter { !isContextCorrection($0) })
+    }
+
+    private static func words(_ text: String) -> [String] {
+        text.lowercased()
+            .split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "-" })
+            .map(String.init)
+    }
+
     public func apply(to text: String) -> (text: String, applied: [AppliedCorrection]) {
         // The result is always the NFC form of the input, even when nothing matches.
         let normalized = text.precomposedStringWithCanonicalMapping
