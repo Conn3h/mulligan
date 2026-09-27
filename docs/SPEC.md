@@ -815,6 +815,13 @@ oracle; they are authored by the orchestrator, not the implementer):
   entry's `write` verbatim (its casing is never adapted to the input) and scanning resumes
   after the span. **Replacement text is never re-matched**, so `foo -> bar` plus
   `bar -> baz` turns `foo` into `bar`, not `baz`.
+- **Already-correct `write` text is not duplicated.** If the text at a winning match's start
+  already reads as that entry's `write` (case-insensitive, NFC-normalised) past the end of
+  the trigger's own match, and that occurrence is fenced the same way a trigger is, the match
+  is skipped and scanning resumes after the existing `write` text instead of replacing it —
+  so `next -> Next.js` does not turn "Next.js" into "Next.js.js", and nothing re-matches
+  inside the skipped span. A same-length occurrence (e.g. `codex -> Codex` matching "codex")
+  is unaffected and still recases normally.
 - `applied` contains one `AppliedCorrection` per entry that fired, **ordered by the
   position of that entry's first match**, with `from` = the exact substring matched by that
   first match (original casing and spacing), `to` = `write`, `count` = how many times the

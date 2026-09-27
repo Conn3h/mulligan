@@ -566,5 +566,101 @@
         "count": 1
       }
     ]
+  },
+  {
+    "name": "write text already present is not duplicated (next -> Next.js)",
+    "entries": [
+      {
+        "kind": "correction",
+        "hear": "next",
+        "write": "Next.js"
+      }
+    ],
+    "input": "I use Next.js daily.",
+    "expected": "I use Next.js daily.",
+    "applied": []
+  },
+  {
+    "name": "write text already present is not duplicated (cloud -> Cloud Code)",
+    "entries": [
+      {
+        "kind": "correction",
+        "hear": "cloud",
+        "write": "Cloud Code"
+      }
+    ],
+    "input": "Open Cloud Code now.",
+    "expected": "Open Cloud Code now.",
+    "applied": []
+  },
+  {
+    "name": "unfenced write occurrence still duplicates as before",
+    "entries": [
+      {
+        "kind": "correction",
+        "hear": "next",
+        "write": "Next.js"
+      }
+    ],
+    "input": "Next.jsx is a file extension.",
+    "expected": "Next.js.jsx is a file extension.",
+    "applied": [
+      {
+        "from": "Next",
+        "to": "Next.js",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "same-length match still recases (pure recasing)",
+    "entries": [
+      {
+        "kind": "correction",
+        "hear": "codex",
+        "write": "Codex"
+      }
+    ],
+    "input": "codex",
+    "expected": "Codex",
+    "applied": [
+      {
+        "from": "codex",
+        "to": "Codex",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "same-length match already correctly cased still fires",
+    "entries": [
+      {
+        "kind": "correction",
+        "hear": "codex",
+        "write": "Codex"
+      }
+    ],
+    "input": "Codex",
+    "expected": "Codex",
+    "applied": [
+      {
+        "from": "Codex",
+        "to": "Codex",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "already-correct write followed by a possessive apostrophe is not duplicated",
+    "entries": [
+      {
+        "kind": "correction",
+        "hear": "next",
+        "write": "Next.js"
+      }
+    ],
+    "input": "I love Next.js's plugins.",
+    "expected": "I love Next.js's plugins.",
+    "applied": []
   }
 ]
