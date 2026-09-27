@@ -123,6 +123,10 @@ final class DictationEraser: TypingObserver {
 
     var isMonitoring: Bool { monitoring }
 
+    /// True while there is a landed dictation that erase would try, which is when the HUD's
+    /// redo hint is worth showing (spec §6.14). Erase can still refuse it on its checks.
+    var hasErasable: Bool { record != nil && !superseded }
+
     func eraseLast(token: EraseToken) async -> EraseOutcome {
         await MutationLane.run {
             (await self.eraseExclusive(token: token), nil)

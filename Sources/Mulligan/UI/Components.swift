@@ -1,8 +1,6 @@
 import SwiftUI
 
-/// Shared pieces for the C1 app shell, built fresh on top of `DS` (spec §6.14). Nothing here
-/// reads `HUDView`'s private types — that view's meter is HUD-only, so `LevelMeterView`
-/// below is a separate implementation sharing only its design tokens.
+/// Shared pieces for the app shell, built on top of `DS` (spec §6.14).
 
 // MARK: - Panel
 
@@ -131,6 +129,9 @@ struct EmptyStateView: View {
 struct SegmentedChoice<Option: Hashable>: View {
     let options: [Option]
     @Binding var selection: Option
+    /// The recessed track behind the pills: `ground` inside a panel, `panel` on the ground.
+    var track: SwiftUI.Color = DS.Color.ground
+    // Declared last so a trailing closure binds to it at call sites that omit `track`.
     let label: (Option) -> String
 
     var body: some View {
@@ -140,7 +141,11 @@ struct SegmentedChoice<Option: Hashable>: View {
             }
         }
         .padding(DS.Space.hair)
-        .background(RoundedRectangle(cornerRadius: DS.Radius.control).fill(DS.Color.ground))
+        .background(RoundedRectangle(cornerRadius: DS.Radius.control).fill(track))
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.Radius.control)
+                .stroke(DS.Color.hairline, lineWidth: DS.Border.hairline)
+        )
     }
 
     private func segment(_ option: Option) -> some View {
@@ -153,7 +158,7 @@ struct SegmentedChoice<Option: Hashable>: View {
                 .foregroundStyle(isSelected ? DS.Color.ink : DS.Color.inkSecondary)
                 .frame(minWidth: DS.Metric.keycapMinWidth)
                 .padding(.horizontal, DS.Space.base)
-                .padding(.vertical, DS.Space.snug)
+                .padding(.vertical, DS.Space.tight)
                 .background(
                     RoundedRectangle(cornerRadius: DS.Radius.control)
                         .fill(isSelected ? DS.Color.selection : DS.Color.clear)
@@ -162,142 +167,60 @@ struct SegmentedChoice<Option: Hashable>: View {
                     RoundedRectangle(cornerRadius: DS.Radius.control)
                         .stroke(isSelected ? DS.Color.hairline : DS.Color.clear, lineWidth: DS.Border.hairline)
                 )
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
 }
 
-// MARK: - Masthead meter
+// MARK: - Keycap
 
-/// Whether the masthead meter should run its per-frame `TimelineView`. Pure so the gate is
-/// tested without a host. Off whenever the window's pixels are not on screen (dictating into
-/// another app, minimised, covered): the level still updates, the meter just stops
-/// repainting. At rest the ripple is decoration, so reduce-motion turns it off; while
-/// recording the meter must track level even with reduce motion, so only visibility gates it.
-enum MeterAnimation {
-    static func shouldAnimate(isActive: Bool, reduceMotion: Bool, windowVisible: Bool) -> Bool {
-        guard windowVisible else { return false }
-        return isActive || !reduceMotion
-    }
-}
-
-/// The masthead's level meter, the window's signature element (§6.14 direction: "quiet
-/// instrument"): `DS.Metric.mastheadBarCount` thin bars spanning the full width offered to
-/// them. Two behaviours, chosen by `isActive`:
-///
-/// - **Recording**: bars light from `DS.Color.meterLow` to `DS.Color.meterHigh` as `level`
-///   climbs, like a classic VU ladder — a fresh implementation, sharing only its tokens with
-///   the HUD's own rippling meter (whose views are private to `HUDView`).
-/// - **At rest**: a faint idle ripple travels through the bars at
-///   `DS.Metric.mastheadRippleAmplitude` of the floor-to-peak range, in the neutral
-///   `DS.Color.inkTertiary` rather than the meter gradient — reserving the green-to-amber
-///   scale for an actual reading, per the rule that those colours mean something.
-///   `reduceMotion` turns the ripple off; the bars then simply rest at the floor.
+/// A key name drawn as a small keycap ("Right ⌥"), for hints that teach the keys.
 @MainActor
-struct MastheadMeterView: View {
-    let level: Float
-    let isActive: Bool
-    let reduceMotion: Bool
-    let windowVisible: Bool
-
-    @State private var clock = MastheadRippleClock()
+struct Keycap: View {
+    let text: String
 
     var body: some View {
-        let animate = MeterAnimation.shouldAnimate(
-            isActive: isActive, reduceMotion: reduceMotion, windowVisible: windowVisible
-        )
-        // A Canvas repaints on each tick WITHOUT a layout pass; the previous HStack of
-        // capsules forced a full NSHostingView.layout() every frame (spec trap: keep
-        // per-frame work off the layout engine). Paused (hidden, or idle + reduce motion)
-        // the TimelineView renders once with the clock's held values: a single static draw.
-        TimelineView(.animation(paused: !animate)) { context in
-            let target = CGFloat(max(0, min(1, level)))
-            let tick = animate
-                ? clock.advance(to: context.date, toward: target)
-                : (elapsed: clock.elapsed, level: clock.level)
-            Canvas { gc, size in
-                draw(into: gc, size: size, elapsed: tick.elapsed, level: tick.level)
-            }
-        }
-        .frame(height: DS.Metric.mastheadBarMaxHeight)
-    }
-
-    private func draw(into gc: GraphicsContext, size: CGSize, elapsed: TimeInterval, level: CGFloat) {
-        let barCount = DS.Metric.mastheadBarCount
-        let spacing = spacing(for: size.width, barCount: barCount)
-        let barWidth = DS.Metric.mastheadBarWidth
-        let lit = litCount(for: level)
-        for index in 0..<barCount {
-            let x = CGFloat(index) * (barWidth + spacing)
-            let height = barHeight(index: index, elapsed: elapsed, lit: lit)
-            let rect = CGRect(x: x, y: size.height - height, width: barWidth, height: height)
-            gc.fill(Path(roundedRect: rect, cornerRadius: barWidth / 2), with: .color(barColor(index: index, lit: lit)))
-        }
-    }
-
-    private func barHeight(index: Int, elapsed: TimeInterval, lit: Int) -> CGFloat {
-        if isActive {
-            return index < lit ? DS.Metric.mastheadBarMaxHeight : DS.Metric.mastheadBarFloor
-        }
-        if reduceMotion {
-            return DS.Metric.mastheadBarFloor
-        }
-        return rippleHeight(index: index, elapsed: elapsed)
-    }
-
-    private func barColor(index: Int, lit: Int) -> SwiftUI.Color {
-        guard isActive else { return DS.Color.inkTertiary }
-        guard index < lit else { return DS.Color.hairline }
-        let lastIndex = DS.Metric.mastheadBarCount - 1
-        let position = lastIndex > 0 ? Double(index) / Double(lastIndex) : 0
-        return DS.Color.meterLow.mix(with: DS.Color.meterHigh, by: position)
-    }
-
-    private func litCount(for level: CGFloat) -> Int {
-        let clamped = max(0, min(1, level))
-        return Int((clamped * CGFloat(DS.Metric.mastheadBarCount)).rounded())
-    }
-
-    private func spacing(for width: CGFloat, barCount: Int) -> CGFloat {
-        let totalBarWidth = CGFloat(barCount) * DS.Metric.mastheadBarWidth
-        let gapCount = max(barCount - 1, 1)
-        return max(DS.Space.hair, (width - totalBarWidth) / CGFloat(gapCount))
-    }
-
-    /// Mirrors `HUDMeterView.wave(index:elapsed:)`: each bar's ripple is offset from every
-    /// other by its index, so the peak travels across the row instead of every bar rising
-    /// together.
-    private func rippleHeight(index: Int, elapsed: TimeInterval) -> CGFloat {
-        let phaseOffset = Double(index) / Double(DS.Metric.mastheadBarCount) * (2 * .pi)
-        let cyclePosition = elapsed / DS.Motion.mastheadMeterCycle * (2 * .pi)
-        let fraction = CGFloat((sin(cyclePosition + phaseOffset) + 1) / 2)
-        let amplitude = CGFloat(DS.Metric.mastheadRippleAmplitude)
-            * (DS.Metric.mastheadBarMaxHeight - DS.Metric.mastheadBarFloor)
-        return DS.Metric.mastheadBarFloor + amplitude * fraction
+        Text(text)
+            .font(DS.Font.caption)
+            .foregroundStyle(DS.Color.ink)
+            .padding(.horizontal, DS.Space.tight + DS.Space.hair)
+            .padding(.vertical, DS.Space.hair)
+            .background(RoundedRectangle(cornerRadius: DS.Radius.control - DS.Space.hair).fill(DS.Color.panelRaised))
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.Radius.control - DS.Space.hair)
+                    .stroke(DS.Color.hairlineStrong, lineWidth: DS.Border.hairline)
+            )
     }
 }
 
-/// A plain reference type held via `@State` for stable identity across re-renders (never
-/// reassigned). `advance(to:toward:)` mutates plain stored properties, not a `@State` value,
-/// so calling it from the `TimelineView` draw closure above is safe — see `HUDMeterClock`'s
-/// doc comment in `HUDView.swift` for why an actual `@State` mutation there would flood the
-/// log.
-@MainActor
-private final class MastheadRippleClock {
-    private var last: Date?
-    private(set) var elapsed: TimeInterval = 0
-    private(set) var level: CGFloat = 0
+// MARK: - Icon button
 
-    /// Advances ripple time and eases the displayed level toward `target`. `dt / quick`
-    /// gives roughly the same settling time the old `.animation(.easeOut(quick))` did.
-    @discardableResult
-    func advance(to date: Date, toward target: CGFloat) -> (elapsed: TimeInterval, level: CGFloat) {
-        let dt = last.map { date.timeIntervalSince($0) } ?? 0
-        last = date
-        elapsed += dt
-        let k = DS.Motion.quick > 0 ? min(1, dt / DS.Motion.quick) : 1
-        level += (target - level) * CGFloat(k)
-        return (elapsed, level)
+/// A square, hairline-bordered button holding one SF Symbol: the header's Record and
+/// Settings buttons. `filled` paints it with `fill` (the Record button while recording).
+@MainActor
+struct IconButtonStyle: ButtonStyle {
+    var size: CGFloat = DS.Metric.iconButtonSize
+    var filled: SwiftUI.Color?
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(DS.Font.label)
+            .foregroundStyle(filled == nil ? DS.Color.inkSecondary : DS.Color.inkOnAccent)
+            .frame(width: size, height: size)
+            .background(
+                RoundedRectangle(cornerRadius: DS.Radius.control)
+                    .fill(filled ?? (configuration.isPressed ? DS.Color.panelRaised : DS.Color.panel))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: DS.Radius.control)
+                    .stroke(filled == nil ? DS.Color.hairline : DS.Color.clear, lineWidth: DS.Border.hairline)
+            )
+            .scaleEffect(configuration.isPressed ? DS.Metric.pressedScale : 1)
+            .animation(reduceMotion ? nil : .easeOut(duration: DS.Motion.quick), value: configuration.isPressed)
+            .contentShape(Rectangle())
     }
 }
 
@@ -365,7 +288,8 @@ struct TextTabs<Option: Hashable>: View {
 
 // MARK: - Content well
 
-/// The recessed surface under the tabs that holds History or Dictionary: `panelSunken`,
+/// The surface under the header that holds History or Dictionary: `panel`, one step above
+/// the window's ground (the design lift, spec v1.5, raised it from the old sunken well),
 /// clipped to `DS.Radius.panel` so the search field and footer inside sit flush with the
 /// rounded corners, with a hairline border for the edge. Unlike `Panel`, this adds no
 /// internal padding — the panel it hosts already paces its own edges (search field, rows,
@@ -376,7 +300,7 @@ struct ContentWell<Content: View>: View {
 
     var body: some View {
         content()
-            .background(DS.Color.panelSunken)
+            .background(DS.Color.panel)
             .clipShape(RoundedRectangle(cornerRadius: DS.Radius.panel))
             .overlay(
                 RoundedRectangle(cornerRadius: DS.Radius.panel)

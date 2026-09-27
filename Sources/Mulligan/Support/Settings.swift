@@ -15,7 +15,12 @@ final class Settings {
         static let soundEnabled = "soundEnabled"
         static let speechEngine = "speechEngine"
         static let eraseKey = "eraseKey"
+        static let redoHintsRemaining = "redoHintsRemaining"
+        static let hasSeenWelcome = "hasSeenWelcome"
     }
+
+    /// How many holds show the HUD's redo hint before it stops (spec §6.14).
+    static let redoHintBudget = 10
 
     @ObservationIgnored private let defaults: UserDefaults
 
@@ -49,6 +54,16 @@ final class Settings {
         didSet { defaults.set(speechEngine.rawValue, forKey: Key.speechEngine) }
     }
 
+    /// Holds left that may show the redo hint; zero once the user has erased once.
+    var redoHintsRemaining: Int {
+        didSet { defaults.set(redoHintsRemaining, forKey: Key.redoHintsRemaining) }
+    }
+
+    /// Set when the first-run welcome is dismissed.
+    var hasSeenWelcome: Bool {
+        didSet { defaults.set(hasSeenWelcome, forKey: Key.hasSeenWelcome) }
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let storedKey = defaults.string(forKey: Key.pushToTalkKey)
@@ -68,6 +83,10 @@ final class Settings {
         soundEnabled = Self.bool(forKey: Key.soundEnabled, in: defaults, default: true)
         speechEngine = defaults.string(forKey: Key.speechEngine)
             .flatMap(SpeechEngineChoice.init(rawValue:)) ?? .apple
+        redoHintsRemaining = defaults.object(forKey: Key.redoHintsRemaining) == nil
+            ? Self.redoHintBudget
+            : defaults.integer(forKey: Key.redoHintsRemaining)
+        hasSeenWelcome = Self.bool(forKey: Key.hasSeenWelcome, in: defaults, default: false)
     }
 
     /// `UserDefaults.bool(forKey:)` returns false for a missing key, which would silently

@@ -1,26 +1,41 @@
 import MulliganDictionary
 import SwiftUI
 
-/// The Dictionary tab (spec §6.14): search, a quiet inline add form, and editable rows for
-/// every entry.
+/// The Dictionary tab (spec §6.14): search and an "Add" button that opens the add form, then
+/// editable rows for every entry, each with how many times it has fired in History.
 @MainActor
 struct DictionaryPanel: View {
     @State private var query = ""
+    @State private var isAdding = false
 
     private var filtered: [DictionaryEntry] {
         DictionaryStore.shared.filtered(by: query)
     }
 
     var body: some View {
+        let usage = CorrectionUsage.counts(entries: DictionaryStore.shared.entries, runs: HistoryStore.shared.runs)
         VStack(spacing: DS.Space.none) {
-            SearchField(text: $query, placeholder: "Search dictionary")
-                .padding(.horizontal, DS.Space.roomy)
-                .padding(.top, DS.Space.base)
-                .padding(.bottom, DS.Space.snug)
+            HStack(spacing: DS.Space.base) {
+                SearchField(text: $query, placeholder: "Search dictionary")
+                Button {
+                    isAdding = true
+                } label: {
+                    Label("Add", systemImage: "plus")
+                }
+                .disabled(isAdding)
+            }
+            .padding(.horizontal, DS.Space.roomy)
+            .padding(.vertical, DS.Space.base)
 
-            AddEntryRow()
-                .padding(.horizontal, DS.Space.roomy)
-                .padding(.bottom, DS.Space.roomy)
+            if isAdding {
+                AddEntryRow(onClose: { isAdding = false })
+                    .padding(.horizontal, DS.Space.roomy)
+                    .padding(.bottom, DS.Space.roomy)
+            }
+
+            Rectangle()
+                .fill(DS.Color.hairline)
+                .frame(height: DS.Border.hairline)
 
             if filtered.isEmpty {
                 EmptyStateView(
@@ -33,16 +48,11 @@ struct DictionaryPanel: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: DS.Space.none) {
-                        ForEach(Array(filtered.enumerated()), id: \.element.id) { index, entry in
-                            if index > 0 {
-                                Rectangle()
-                                    .fill(DS.Color.hairline)
-                                    .frame(height: DS.Border.hairline)
-                            }
-                            DictionaryRow(entry: entry)
+                        ForEach(filtered) { entry in
+                            DictionaryRow(entry: entry, uses: usage[entry.id] ?? 0)
                         }
                     }
-                    .padding(.bottom, DS.Space.roomy)
+                    .padding(.vertical, DS.Space.snug)
                 }
             }
         }
@@ -70,12 +80,14 @@ private struct RepresentabilityIssueList: View {
     }
 }
 
-/// A single quiet inline form at the top of the well: a small kind switch (term /
-/// correction), the hear/write fields (hear hidden for terms), inline representability
-/// issues and warnings for the entry as typed, and a plain text "Add".
+/// The add form, opened by the panel's "Add" button: a small kind switch (term /
+/// correction), the hear/write fields (hear hidden for terms), the representability issues
+/// and warnings once something has been typed, and Cancel / Add.
 @MainActor
 private struct AddEntryRow: View {
     private static let kinds: [DictionaryEntry.Kind] = [.term, .correction]
+
+    let onClose: () -> Void
 
     @State private var kind: DictionaryEntry.Kind = .term
     @State private var hear = ""
@@ -105,6 +117,11 @@ private struct AddEntryRow: View {
         issues.isEmpty && !DictionaryStore.shared.loadFailed
     }
 
+    /// Issues and warnings wait until something has been typed: an empty form is not wrong.
+    private var hasTyped: Bool {
+        !trimmedWrite.isEmpty || !trimmedHear.isEmpty
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: DS.Space.base) {
             TextTabs(options: Self.kinds, selection: $kind, size: .small) { option in
@@ -116,7 +133,9 @@ private struct AddEntryRow: View {
             }
             field(kind == .term ? "Term" : "Write (what it should say)", text: $write)
 
-            RepresentabilityIssueList(issues: issues)
+            if hasTyped {
+                RepresentabilityIssueList(issues: issues)
+            }
 
             if DictionaryStore.shared.loadFailed {
                 Text(Self.loadFailedMessage)
@@ -124,22 +143,38 @@ private struct AddEntryRow: View {
                     .foregroundStyle(DS.Color.ink)
             }
 
-            ForEach(warnings) { warning in
-                Text(warning.message)
-                    .font(DS.Font.caption)
-                    .foregroundStyle(DS.Color.inkSecondary)
+            if hasTyped {
+                ForEach(warnings) { warning in
+                    Text(warning.message)
+                        .font(DS.Font.caption)
+                        .foregroundStyle(DS.Color.inkSecondary)
+                }
             }
 
-            Button("Add") {
-                DictionaryStore.shared.add(DictionaryEntry(kind: kind, write: trimmedWrite, hear: trimmedHear))
-                write = ""
-                hear = ""
+            HStack(spacing: DS.Space.snug) {
+                Spacer()
+                Button("Cancel") {
+                    write = ""
+                    hear = ""
+                    onClose()
+                }
+                .keyboardShortcut(.cancelAction)
+                Button("Add") {
+                    DictionaryStore.shared.add(DictionaryEntry(kind: kind, write: trimmedWrite, hear: trimmedHear))
+                    write = ""
+                    hear = ""
+                    onClose()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canAdd || !hasTyped)
             }
-            .buttonStyle(.plain)
-            .font(DS.Font.label)
-            .foregroundStyle(canAdd ? DS.Color.ink : DS.Color.inkTertiary)
-            .disabled(!canAdd)
         }
+        .padding(DS.Space.roomy)
+        .background(RoundedRectangle(cornerRadius: DS.Radius.panel).fill(DS.Color.panelRaised))
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.Radius.panel)
+                .stroke(DS.Color.hairline, lineWidth: DS.Border.hairline)
+        )
     }
 
     static let loadFailedMessage =
@@ -152,7 +187,7 @@ private struct AddEntryRow: View {
             .foregroundStyle(DS.Color.ink)
             .padding(.horizontal, DS.Space.base)
             .padding(.vertical, DS.Space.snug)
-            .background(RoundedRectangle(cornerRadius: DS.Radius.control).fill(DS.Color.panelRaised))
+            .background(RoundedRectangle(cornerRadius: DS.Radius.control).fill(DS.Color.panel))
             .overlay(
                 RoundedRectangle(cornerRadius: DS.Radius.control)
                     .stroke(DS.Color.hairline, lineWidth: DS.Border.hairline)
@@ -170,6 +205,8 @@ private struct AddEntryRow: View {
 @MainActor
 private struct DictionaryRow: View {
     let entry: DictionaryEntry
+    /// Times this entry has fired across History (`CorrectionUsage`).
+    let uses: Int
 
     @State private var isEditing = false
     @State private var isHovering = false
@@ -187,8 +224,9 @@ private struct DictionaryRow: View {
         DictionaryFile.representabilityIssues(for: draftEntry)
     }
 
-    init(entry: DictionaryEntry) {
+    init(entry: DictionaryEntry, uses: Int) {
         self.entry = entry
+        self.uses = uses
         _draftWrite = State(initialValue: entry.write)
         _draftHear = State(initialValue: entry.hear)
     }
@@ -207,7 +245,15 @@ private struct DictionaryRow: View {
 
             if isEditing {
                 EmptyView()
-            } else if isHovering {
+            } else if !isHovering {
+                // Terms mostly bias recognition rather than fire, so zero shows nothing.
+                if uses > 0 {
+                    Text("\(uses)\u{00D7}")
+                        .font(DS.Font.caption.monospacedDigit())
+                        .foregroundStyle(DS.Color.inkTertiary)
+                        .help(uses == 1 ? "Fired once in History" : "Fired \(uses) times in History")
+                }
+            } else {
                 Toggle("", isOn: Binding(
                     get: { entry.isEnabled },
                     set: { newValue in
@@ -242,9 +288,13 @@ private struct DictionaryRow: View {
                 .accessibilityLabel("Delete entry")
             }
         }
-        .padding(.horizontal, DS.Space.roomy)
-        .padding(.vertical, DS.Space.base)
-        .background(isHovering ? DS.Color.panel : DS.Color.clear)
+        .padding(.horizontal, DS.Space.snug)
+        .padding(.vertical, DS.Space.snug)
+        .background(
+            RoundedRectangle(cornerRadius: DS.Radius.control)
+                .fill(isHovering ? DS.Color.panelRaised : DS.Color.clear)
+        )
+        .padding(.horizontal, DS.Space.snug)
         .opacity(entry.isEnabled ? 1 : DS.Metric.disabledEntryOpacity)
         .onHover { hovering in
             isHovering = hovering
