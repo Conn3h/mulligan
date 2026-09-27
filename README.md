@@ -41,6 +41,10 @@ Then grant two permissions, neither of which can be requested silently:
 Sotto notices the Accessibility grant on its own; no restart needed. Then hold
 **Right Option** and talk.
 
+Said it wrong? Keep holding **Right Option** and tap **Right Command**: Sotto removes what it
+just typed and listens again, so you simply say it again. It only erases text it can show is
+still its own, and tells you why when it refuses. Both keys can be changed in Settings.
+
 Other targets: `make test`, `make app`, `make run`, `make clean`.
 
 ## Building from source
