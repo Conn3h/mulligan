@@ -1,0 +1,28 @@
+Tests/MulliganAppTests/MeterScaleTests.swift
+  s_54db94c607acba::t_2b3b9144a35d17 1-23,25-31
+  s_54db94c607acba::t_8d82e42edb515f 24
+Sources/Mulligan/UI/DesignSystem.swift
+  s_54db94c607acba::t_34017678b84116 380-382
+Sources/Mulligan/UI/HUDView.swift
+  s_54db94c607acba::t_bb543ead4d6524 135
+Sources/Mulligan/UI/TeeShotMark.swift
+  s_54db94c607acba::t_76b449f0080427 82-91
+docs/SPEC.md
+  s_54db94c607acba::t_d00f4714a9e6f3 1163-1165
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "8584f5375b058b18231ccd0cf26c8f87ffc12873",
+  "prompts": {},
+  "sessions": {
+    "s_54db94c607acba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9cec764-c6e0-4aee-98d4-309aa9357e9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
