@@ -1,0 +1,33 @@
+Sources/Sotto/Core/TextInjector.swift
+  s_54db94c607acba::t_59760ff5a7a8d7 82-83,85,91-93,104,153-155,157,623-624,627-629
+Sources/Sotto/Core/UtterancePipeline.swift
+  s_54db94c607acba::t_59760ff5a7a8d7 24-25,29-30,53-55,60,78-80,111
+Tests/SottoAppTests/UtterancePipelineTests.swift
+  s_54db94c607acba::t_07055a92b9f839 11-12,48,50,56-59,220-223
+  s_54db94c607acba::t_8d81e995ce72e3 224-225
+Sources/Sotto/Core/DictationEraser.swift
+  s_54db94c607acba::t_59760ff5a7a8d7 110-111,114,117-118,221,263,265,285-289
+  s_54db94c607acba::t_f1bc08ac667180 290-291
+Tests/SottoAppTests/DictationEraserTests.swift
+  s_54db94c607acba::t_07055a92b9f839 452-486
+Sources/Sotto/Core/ErasePlan.swift
+  s_54db94c607acba::t_59760ff5a7a8d7 41-47
+docs/SPEC.md
+  s_54db94c607acba::t_0d50939fc52485 1310-1317,1380-1382
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "bd22863525d8f959b72d4fd97c3abd8e6048ee1f",
+  "prompts": {},
+  "sessions": {
+    "s_54db94c607acba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9cec764-c6e0-4aee-98d4-309aa9357e9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
