@@ -836,6 +836,20 @@ struct DictationControllerTests {
         #expect(harness.factory.made.count == 1)
     }
 
+    @Test func deactivateBeforeTheEraseStartsCancelsIt() async throws {
+        let microphone = Gate(open: false)
+        let harness = Harness(microphoneGate: microphone)
+        harness.controller.activate()
+        harness.hotkey.press()
+        await microphone.waitForArrival()
+        harness.hotkey.erase()      // the terminal task now waits for setup to unwind
+        harness.controller.deactivate()
+        await microphone.open()
+        try await settle("settled") { !harness.state.isActive && harness.controller.liveTaskCount == 0 }
+        #expect(harness.eraseCalls == 0)
+        #expect(harness.factory.made.isEmpty)
+    }
+
     @Test func recordButtonDuringErasingIsIgnored() async throws {
         let harness = Harness()
         let gate = Gate(open: false)

@@ -259,7 +259,13 @@ final class DictationController {
 
     /// Ends any utterance without a final callback, then stops the hotkey.
     func deactivate() {
+        // An erase already running stops before its next side effect; one requested but not
+        // yet started (its utterance is still unwinding) never starts.
         eraseToken?.revoke()
+        if let session, session.eraseRequested {
+            session.eraseRequested = false
+            Log.app.info("erase for utterance \(session.id, privacy: .public) cancelled by deactivate")
+        }
         dropPendingPress(reason: "controller deactivated")
         if let session {
             terminate(session, reason: .aborted)
