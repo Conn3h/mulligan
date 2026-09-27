@@ -141,7 +141,8 @@ final class FakeCapture: AudioCapturing {
         var previous: Session?
         var startCalls = 0
         var stopCalls = 0
-        var startError: TestError?
+        var startError: (any Error)?
+        var startInterruption: String?
     }
 
     private let state = Mutex(State())
@@ -150,8 +151,14 @@ final class FakeCapture: AudioCapturing {
     var stopCalls: Int { state.withLock { $0.stopCalls } }
     var isRunning: Bool { state.withLock { $0.current != nil } }
 
-    func failNextStart(with error: TestError) {
+    func failNextStart(with error: any Error) {
         state.withLock { $0.startError = error }
+    }
+
+    /// Makes the next `start` report an interruption before it returns, as a device change
+    /// racing the start would. The controller must still see it after listening begins.
+    func interruptDuringNextStart(_ message: String) {
+        state.withLock { $0.startInterruption = message }
     }
 
     func start(
@@ -160,7 +167,7 @@ final class FakeCapture: AudioCapturing {
         onLevel: @escaping @Sendable (Float) -> Void,
         onInterruption: @escaping @Sendable (String) -> Void
     ) throws {
-        try state.withLock { state in
+        let interruption: String? = try state.withLock { state in
             state.startCalls += 1
             if let error = state.startError {
                 state.startError = nil
@@ -171,6 +178,12 @@ final class FakeCapture: AudioCapturing {
             )
             state.previous = state.current ?? state.previous
             state.current = session
+            let interruption = state.startInterruption
+            state.startInterruption = nil
+            return interruption
+        }
+        if let interruption {
+            onInterruption(interruption)
         }
     }
 
@@ -204,6 +217,17 @@ final class FakeCapture: AudioCapturing {
     @discardableResult
     func emitInterruption(_ message: String) -> Bool {
         guard let session = state.withLock({ $0.current }) else {
+            return false
+        }
+        session.onInterruption(message)
+        return true
+    }
+
+    /// Fires the interruption callback of the most recently stopped session, as a late
+    /// device-change handler would. Returns false when no session has stopped yet.
+    @discardableResult
+    func emitStaleInterruption(_ message: String) -> Bool {
+        guard let session = state.withLock({ $0.previous }) else {
             return false
         }
         session.onInterruption(message)
@@ -348,6 +372,9 @@ final class Harness {
     private(set) var received: [(text: String, utterance: Utterance)] = []
     /// What the fake delivery reports back, as the pipeline does when text could not be typed.
     var deliveryNotice: String?
+    /// When set, every delivery records its text and then parks here, as a slow format or
+    /// injection would, so a test can act while the controller awaits the callback.
+    var deliveryGate: Gate?
 
     init(
         engines: [FakeEngine] = [],
@@ -382,6 +409,9 @@ final class Harness {
         )
         controller.onFinalTranscript = { [weak self] text, utterance in
             self?.received.append((text: text, utterance: utterance))
+            if let gate = self?.deliveryGate {
+                await gate.pass()
+            }
             return self?.deliveryNotice
         }
     }
