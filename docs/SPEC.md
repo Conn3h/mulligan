@@ -502,7 +502,7 @@ struct Utterance: Sendable {
          maxHold: Duration = .seconds(180),             // cap on .listening: a stuck recording ends as a release
          deliveryTimeout: Duration = .seconds(10),      // cap on onFinalTranscript so a hung pipeline cannot wedge .finishing
          eraseTimeout: Duration = .seconds(3),          // cap on eraseLast so a stuck target cannot wedge .erasing
-         eraseLast: @escaping @MainActor () async -> EraseOutcome = { .nothingToErase })   // §6.16
+         eraseLast: @escaping @MainActor (EraseToken) async -> EraseOutcome = { _ in .nothingToErase })   // §6.16
 
     /// Receives the final raw transcript once per utterance. Awaited before returning to idle.
     /// A returned message (the text was recorded but not typed) is shown as the ending error.

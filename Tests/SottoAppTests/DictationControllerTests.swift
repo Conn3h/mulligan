@@ -677,6 +677,193 @@ struct DictationControllerTests {
         try await settle("idle") { harness.state == .idle }
         #expect(harness.received.map(\.text) == ["from the window"])
     }
+
+    // MARK: Erase (§6.16)
+
+    @Test func eraseWhileListeningCancelsErasesAndRestartsWhileHeld() async throws {
+        let first = FakeEngine(.init(finalText: "wrong"))
+        let second = FakeEngine(.init(finalText: "right"))
+        let harness = Harness(engines: [first, second])
+        harness.controller.activate()
+        try await harness.pressAndListen()
+        harness.hotkey.erase()
+        try await settle("restarted") { harness.state == .listening && harness.factory.made.count == 2 }
+        #expect(harness.eraseCalls == 1)
+        #expect(harness.received.isEmpty)
+        #expect(await first.cancelCalls == 1)
+        #expect(await first.finishCalls == 0)
+        try await harness.releaseAndIdle()
+        #expect(harness.received.map(\.text) == ["right"])
+        #expect(harness.controller.liveTaskCount == 0)
+    }
+
+    @Test func activatePassesTheEraseKeyFromSettings() {
+        let harness = Harness()
+        let saved = Settings.shared.eraseKey
+        defer { Settings.shared.eraseKey = saved }
+        Settings.shared.eraseKey = .off
+        harness.controller.activate()
+        #expect(harness.hotkey.eraseKey == .off)
+        Settings.shared.eraseKey = saved
+        harness.controller.reloadHotkey()
+        #expect(harness.hotkey.eraseKey == saved)
+    }
+
+    @Test func showsErasingWhileTheEraserRuns() async throws {
+        let harness = Harness()
+        let gate = Gate(open: false)
+        harness.eraseGate = gate
+        harness.controller.activate()
+        try await harness.pressAndListen()
+        harness.hotkey.erase()
+        await gate.waitForArrival()
+        #expect(harness.state == .erasing)
+        #expect(harness.state.isActive)
+        #expect(harness.state.showsHUD)
+        await gate.open()
+        try await settle("restarted") { harness.state == .listening }
+        try await harness.releaseAndIdle()
+    }
+
+    @Test func releaseDuringErasingErasesWithoutRestarting() async throws {
+        let harness = Harness()
+        let gate = Gate(open: false)
+        harness.eraseGate = gate
+        harness.controller.activate()
+        try await harness.pressAndListen()
+        harness.hotkey.erase()
+        await gate.waitForArrival()
+        harness.hotkey.release()
+        await gate.open()
+        try await settle("idle") { harness.state == .idle && harness.controller.liveTaskCount == 0 }
+        #expect(harness.factory.made.count == 1)
+    }
+
+    @Test(arguments: [
+        EraseOutcome.nothingToErase, .notTyped, .inputSince, .textChanged, .tooLongToVerify, .interrupted, .failed,
+    ])
+    func aRefusedEraseShowsItsMessageAndDoesNotRestart(_ outcome: EraseOutcome) async throws {
+        let harness = Harness(errorDisplayDuration: .milliseconds(100))
+        harness.eraseOutcome = outcome
+        harness.controller.activate()
+        try await harness.pressAndListen()
+        harness.hotkey.erase()
+        try await settle("error") { harness.state == .error(outcome.message!) }
+        try await settle("idle") { harness.state == .idle && harness.controller.liveTaskCount == 0 }
+        #expect(harness.factory.made.count == 1)
+    }
+
+    @Test func eraseTimeoutRevokesTheTokenAndFails() async throws {
+        let harness = Harness(errorDisplayDuration: .milliseconds(100), eraseTimeout: .milliseconds(50))
+        let gate = Gate(open: false)
+        harness.eraseGate = gate
+        harness.controller.activate()
+        try await harness.pressAndListen()
+        harness.hotkey.erase()
+        try await settle("error") { harness.state == .error(EraseOutcome.failed.message!) }
+        #expect(harness.lastEraseToken?.isRevoked == true)
+        #expect(harness.factory.made.count == 1)
+        await gate.open()
+        try await settle("idle") { harness.state == .idle && harness.controller.liveTaskCount == 0 }
+    }
+
+    @Test func aPressAfterAnEraseTimeoutStartsNormally() async throws {
+        let harness = Harness(
+            engines: [FakeEngine(), FakeEngine(.init(finalText: "next"))],
+            errorDisplayDuration: .milliseconds(100),
+            eraseTimeout: .milliseconds(50)
+        )
+        let gate = Gate(open: false)
+        harness.eraseGate = gate
+        harness.controller.activate()
+        try await harness.pressAndListen()
+        harness.hotkey.erase()
+        try await settle("error") { harness.state == .error(EraseOutcome.failed.message!) }
+        harness.hotkey.release()
+        try await harness.pressAndListen()
+        try await harness.releaseAndIdle()
+        #expect(harness.received.map(\.text) == ["next"])
+        await gate.open()
+    }
+
+    @Test func eraseQueuedBehindADeliveryRunsAfterIt() async throws {
+        let harness = Harness(engines: [FakeEngine(.init(finalText: "first")), FakeEngine(.init(finalText: "again"))])
+        let gate = Gate(open: false)
+        harness.deliveryGate = gate
+        harness.controller.activate()
+        try await harness.pressAndListen()
+        harness.hotkey.release()
+        await gate.waitForArrival()
+        harness.hotkey.press()
+        harness.hotkey.erase()
+        #expect(harness.eraseCalls == 0)
+        harness.deliveryGate = nil
+        await gate.open()
+        try await settle("restarted") { harness.state == .listening && harness.factory.made.count == 2 }
+        #expect(harness.eraseCalls == 1)
+        #expect(harness.received.map(\.text) == ["first"])
+        try await harness.releaseAndIdle()
+        #expect(harness.received.map(\.text) == ["first", "again"])
+    }
+
+    @Test func eraseIsIgnoredForButtonSessionsAndWhenIdle() async throws {
+        let harness = Harness()
+        harness.controller.activate()
+        harness.hotkey.erase()
+        #expect(harness.eraseCalls == 0)
+        harness.controller.startButtonRecording()
+        try await settle("listening") { harness.state == .listening }
+        harness.hotkey.erase()
+        #expect(harness.state == .listening)
+        harness.controller.stopButtonRecording()
+        try await settle("idle") { harness.state == .idle }
+        #expect(harness.eraseCalls == 0)
+        #expect(harness.received.count == 1)
+    }
+
+    @Test func deactivateDuringErasingRevokesAndDoesNotRestart() async throws {
+        let harness = Harness()
+        let gate = Gate(open: false)
+        harness.eraseGate = gate
+        harness.controller.activate()
+        try await harness.pressAndListen()
+        harness.hotkey.erase()
+        await gate.waitForArrival()
+        harness.controller.deactivate()
+        #expect(harness.lastEraseToken?.isRevoked == true)
+        await gate.open()
+        try await settle("settled") { !harness.state.isActive && harness.controller.liveTaskCount == 0 }
+        #expect(harness.factory.made.count == 1)
+    }
+
+    @Test func recordButtonDuringErasingIsIgnored() async throws {
+        let harness = Harness()
+        let gate = Gate(open: false)
+        harness.eraseGate = gate
+        harness.controller.activate()
+        try await harness.pressAndListen()
+        harness.hotkey.erase()
+        await gate.waitForArrival()
+        harness.controller.startButtonRecording()
+        await gate.open()
+        try await settle("restarted from the hotkey") { harness.state == .listening && harness.factory.made.count == 2 }
+        try await harness.releaseAndIdle()
+        #expect(harness.received.map(\.utterance.source) == [.hotkey])
+    }
+
+    @Test func reloadDuringErasingDoesNotRestart() async throws {
+        let harness = Harness()
+        let gate = Gate(open: false)
+        harness.eraseGate = gate
+        harness.controller.activate()
+        try await harness.pressAndListen()
+        harness.hotkey.erase()
+        await gate.waitForArrival()
+        harness.controller.reloadHotkey()
+        await gate.open()
+        try await settle("idle") { harness.state == .idle && harness.controller.liveTaskCount == 0 }
+        #expect(harness.factory.made.count == 1)
+    }
 }
 
 @Suite
