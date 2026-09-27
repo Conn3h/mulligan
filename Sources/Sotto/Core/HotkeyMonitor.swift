@@ -82,7 +82,7 @@ final class HotkeyMonitor: HotkeySource {
     /// not reliably reported by `CGEventSource` flag state, but per-key state is. Injectable
     /// so the reconciliation path can be unit-tested without a real event tap.
     var isKeyDown: (PushToTalkKey) -> Bool = { key in
-        CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(key.keyCode))
+        HotkeyMonitor.isPhysicallyDown(CGKeyCode(key.keyCode))
     }
 
     /// Physical state of the erase key, by keycode like `isKeyDown`. Injectable for tests.
@@ -90,7 +90,16 @@ final class HotkeyMonitor: HotkeySource {
         guard let code = key.keyCode else {
             return false
         }
-        return CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(code))
+        return HotkeyMonitor.isPhysicallyDown(CGKeyCode(code))
+    }
+
+    /// Down in either the hardware state or the session state. This tap swallows the
+    /// push-to-talk key's own events, so the session state alone may never see it go down;
+    /// the hardware state does. Either saying "down" counts: it can only make reconciliation
+    /// wait for a real release, and lets the erase check see a key Sotto is holding back.
+    nonisolated static func isPhysicallyDown(_ keyCode: CGKeyCode) -> Bool {
+        CGEventSource.keyState(.hidSystemState, key: keyCode)
+            || CGEventSource.keyState(.combinedSessionState, key: keyCode)
     }
 
     init() {}
@@ -204,7 +213,13 @@ final class HotkeyMonitor: HotkeySource {
     /// can never make Sotto eat a later ordinary Command up and leave Command stuck in the app.
     private func handleEraseModifier(down: Bool) -> Bool {
         if down {
-            guard isPressed, isKeyDown(key) else {
+            let physicallyHeld = isPressed && isKeyDown(key)
+            guard physicallyHeld else {
+                if isPressed {
+                    Log.hotkey.info(
+                        "erase key ignored: \(self.key.displayName, privacy: .public) is believed down but does not read as physically down"
+                    )
+                }
                 eraseModifierSwallowed = false
                 return false
             }
