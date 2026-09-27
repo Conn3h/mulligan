@@ -1,0 +1,38 @@
+Sources/Sotto/Core/ErasePlan.swift
+  s_54db94c607acba::t_d4330481ff78ef 41-43,60-62,68-71,141,183-186,191-194,207-230
+  s_54db94c607acba::t_adc35ce10ef20e 231-232
+Tests/SottoAppTests/DictationEraserTests.swift
+  s_54db94c607acba::t_35b35177087563 696-722
+  s_54db94c607acba::t_b5a950418d18f0 189-192
+Sources/Sotto/Core/DictationEraser.swift
+  s_54db94c607acba::t_2740171a45c42f 361-362,365
+Sources/Sotto/Core/SystemEraseTarget.swift
+  s_54db94c607acba::t_943d56dd8fe1e6 21-23
+Tests/SottoAppTests/TerminalAppsTests.swift
+  s_54db94c607acba::t_0915bf5682697c 23-35
+Sources/Sotto/Core/TerminalApps.swift
+  s_54db94c607acba::t_943d56dd8fe1e6 1-4,16-26
+  s_54db94c607acba::t_f52fe56e19d0ac 27
+Tests/SottoAppTests/ErasePlanTests.swift
+  s_54db94c607acba::t_2feee01e4a7464 15-16,18-20,23-24,125-158
+Sources/Sotto/Core/TextInjector.swift
+  s_54db94c607acba::t_943d56dd8fe1e6 133-140,144,172,176-177,181-182,189,201-204,206-209
+docs/SPEC.md
+  s_54db94c607acba::t_aaa34c2d87fdac 1332-1339,1372-1375,1399-1401,1404-1410,1421-1422
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "847f69272cd9c91784fd81d9902e682e01054bf1",
+  "prompts": {},
+  "sessions": {
+    "s_54db94c607acba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9cec764-c6e0-4aee-98d4-309aa9357e9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
