@@ -88,8 +88,25 @@ struct HotkeyMonitorTests {
     }
     // MARK: Erase modifier (§6.16)
 
-    private func erase(_ down: Bool, _ key: EraseKey = .rightCommand) -> (CGEventType, Int64, CGEventFlags) {
-        (.flagsChanged, key.keyCode!, down ? key.flag! : [])
+    /// The erase key's own event. Like a real one it carries every modifier held at that
+    /// moment, including push to talk's device bit while the board says it is down.
+    private func erase(
+        _ down: Bool, _ board: KeyBoard, _ key: EraseKey = .rightCommand, ptt: PushToTalkKey = .rightOption
+    ) -> (CGEventType, Int64, CGEventFlags) {
+        var flags: CGEventFlags = down ? key.flag! : []
+        if board.pttDown {
+            flags.formUnion(ptt.flag)
+        }
+        return (.flagsChanged, key.keyCode!, flags)
+    }
+
+    /// Push to talk going down, carrying the erase key's bit when the board says it is down.
+    private func pttDown(_ board: KeyBoard, _ key: PushToTalkKey = .rightOption) -> (CGEventType, Int64, CGEventFlags) {
+        var flags = key.flag
+        if board.eraseDown {
+            flags.formUnion(EraseKey.rightCommand.flag!)
+        }
+        return (.flagsChanged, key.keyCode, flags)
     }
 
     private func armed(pttDown: Bool = true, eraseDown: Bool = false) -> (HotkeyMonitor, KeyBoard) {
@@ -113,94 +130,111 @@ struct HotkeyMonitorTests {
 
     @Test func eraseDownWhileHeldFiresOnceAndIsSwallowedWithItsUp() {
         let (monitor, board) = armed()
-        _ = send(monitor, pressEvent(.rightOption))
-        #expect(send(monitor, erase(true)))
-        #expect(send(monitor, erase(false)))
+        _ = send(monitor, pttDown(board))
+        #expect(send(monitor, erase(true, board)))
+        #expect(send(monitor, erase(false, board)))
         #expect(board.events == ["press", "erase"])
     }
 
     @Test func eraseUpIsSwallowedAfterPushToTalkWasReleasedFirst() {
         let (monitor, board) = armed()
-        _ = send(monitor, pressEvent(.rightOption))
-        _ = send(monitor, erase(true))
+        _ = send(monitor, pttDown(board))
+        _ = send(monitor, erase(true, board))
         board.pttDown = false
         _ = monitor.handle(type: .flagsChanged, keyCode: PushToTalkKey.rightOption.keyCode, flags: [])
-        #expect(send(monitor, erase(false)))
+        #expect(send(monitor, erase(false, board)))
         #expect(board.events == ["press", "erase", "release"])
     }
 
     @Test func eraseKeyWithoutPushToTalkPassesAndFiresNothing() {
         let (monitor, board) = armed(pttDown: false)
-        #expect(!send(monitor, erase(true)))
-        #expect(!send(monitor, erase(false)))
+        #expect(!send(monitor, erase(true, board)))
+        #expect(!send(monitor, erase(false, board)))
         #expect(board.events.isEmpty)
     }
 
     @Test func aStalePressedStateDoesNotTurnCommandIntoErase() {
         let (monitor, board) = armed()
-        _ = send(monitor, pressEvent(.rightOption))
-        board.pttDown = false  // released, but the up was lost
-        #expect(!send(monitor, erase(true)))
+        _ = send(monitor, pttDown(board))
+        board.pttDown = false  // released, but the up was lost: the Command event lacks its bit
+        #expect(!send(monitor, erase(true, board)))
         #expect(board.events == ["press"])
     }
 
     @Test func aRepeatedEraseDownWithoutAnUpFiresOnce() {
         let (monitor, board) = armed()
-        _ = send(monitor, pressEvent(.rightOption))
-        _ = send(monitor, erase(true))
-        #expect(send(monitor, erase(true)))
+        _ = send(monitor, pttDown(board))
+        _ = send(monitor, erase(true, board))
+        #expect(send(monitor, erase(true, board)))
         #expect(board.events == ["press", "erase"])
     }
 
     @Test func eraseKeyFirstThenPushToTalkErasesAndPassesTheEraseUp() {
         let (monitor, board) = armed(eraseDown: true)
-        _ = send(monitor, pressEvent(.rightOption))
+        _ = send(monitor, pttDown(board))
         #expect(board.events == ["press", "erase"])
-        #expect(!send(monitor, erase(false)))
+        #expect(!send(monitor, erase(false, board)))
     }
 
     @Test func aPassedThroughDownClearsAStaleSwallowFlag() {
         let (monitor, board) = armed()
-        _ = send(monitor, pressEvent(.rightOption))
-        _ = send(monitor, erase(true))  // its up is then lost
+        _ = send(monitor, pttDown(board))
+        _ = send(monitor, erase(true, board))  // its up is then lost
         board.pttDown = false
         _ = monitor.handle(type: .flagsChanged, keyCode: PushToTalkKey.rightOption.keyCode, flags: [])
-        #expect(!send(monitor, erase(true)))   // an ordinary Command down reaches the app
-        #expect(!send(monitor, erase(false)))  // and so must its up
+        #expect(!send(monitor, erase(true, board)))   // an ordinary Command down reaches the app
+        #expect(!send(monitor, erase(false, board)))  // and so must its up
     }
 
     @Test func tapReenableClearsALostEraseUp() {
         let (monitor, board) = armed()
-        _ = send(monitor, pressEvent(.rightOption))
-        _ = send(monitor, erase(true))
+        _ = send(monitor, pttDown(board))
+        _ = send(monitor, erase(true, board))
         board.eraseDown = false
         _ = monitor.handle(type: .tapDisabledByTimeout, keyCode: 0, flags: [])
         board.pttDown = false
         _ = monitor.handle(type: .flagsChanged, keyCode: PushToTalkKey.rightOption.keyCode, flags: [])
-        #expect(!send(monitor, erase(false)))
+        #expect(!send(monitor, erase(false, board)))
     }
 
     @Test func stopClearsTheSwallowFlag() {
         let (monitor, board) = armed()
-        _ = send(monitor, pressEvent(.rightOption))
-        _ = send(monitor, erase(true))
+        _ = send(monitor, pttDown(board))
+        _ = send(monitor, erase(true, board))
         monitor.stop()
         board.pttDown = false
-        #expect(!send(monitor, erase(false)))
+        #expect(!send(monitor, erase(false, board)))
     }
 
     @Test func eraseOffFiresNothing() {
         let (monitor, board) = armed()
         monitor.eraseKey = .off
-        _ = send(monitor, pressEvent(.rightOption))
-        #expect(!send(monitor, erase(true)))
+        _ = send(monitor, pttDown(board))
+        #expect(!send(monitor, erase(true, board)))
         #expect(board.events == ["press"])
+    }
+
+    /// What the user's Mac does (2026-09-27): the key-state probe reports a swallowed
+    /// modifier as up while it is held. The event's own flags are the truth.
+    @Test func eraseFiresWhenTheKeyStateProbeCannotSeeTheHeldKey() {
+        let (monitor, board) = armed()
+        monitor.isKeyDown = { _ in false }
+        _ = send(monitor, pttDown(board))
+        #expect(send(monitor, erase(true, board)))
+        #expect(board.events == ["press", "erase"])
+    }
+
+    @Test func theOtherOrderFiresWhenTheKeyStateProbeCannotSeeTheEraseKey() {
+        let (monitor, board) = armed(eraseDown: true)
+        monitor.isEraseKeyDown = { _ in false }
+        _ = send(monitor, pttDown(board))
+        #expect(board.events == ["press", "erase"])
     }
 
     @Test func aConflictingPairNeverSwallowsPushToTalk() {
         let (monitor, board) = armed()
         monitor.eraseKey = .rightOption
-        _ = send(monitor, pressEvent(.rightOption))
+        _ = send(monitor, pttDown(board))
         _ = monitor.handle(type: .flagsChanged, keyCode: PushToTalkKey.rightOption.keyCode, flags: [])
         #expect(board.events == ["press", "release"])
     }
@@ -209,13 +243,14 @@ struct HotkeyMonitorTests {
         let (monitor, board) = armed()
         monitor.key = .rightCommand
         monitor.eraseKey = .rightOption
-        _ = send(monitor, pressEvent(.rightCommand))
-        #expect(send(monitor, erase(true, .rightOption)))
+        _ = send(monitor, pttDown(board, .rightCommand))
+        #expect(send(monitor, erase(true, board, .rightOption, ptt: .rightCommand)))
         #expect(board.events == ["press", "erase"])
     }
 }
 
-/// Physical key state and the callbacks a test observed.
+/// Physical key state and the callbacks a test observed. `pttDown` also feeds the monitor's
+/// key-state probe, which only reconciliation uses.
 @MainActor
 private final class KeyBoard {
     var events: [String] = []

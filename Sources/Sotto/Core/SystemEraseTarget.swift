@@ -83,8 +83,20 @@ final class SystemEraseTarget: EraseTarget {
         return count
     }
 
+    /// For the modifiers that can be erase keys, the hardware modifier flags: the per-key state
+    /// reads a modifier Sotto's tap swallows as up while it is held (measured 2026-09-27). The
+    /// generic mask is stricter than the key itself (either Command counts), which only ever
+    /// makes the eraser wait or stop, never post.
     func isKeyDown(_ keyCode: Int64) -> Bool {
-        CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(keyCode))
+        let flags = CGEventSource.flagsState(.hidSystemState)
+        switch keyCode {
+        case PushToTalkKey.rightCommand.keyCode:
+            return flags.contains(.maskCommand)
+        case PushToTalkKey.rightOption.keyCode:
+            return flags.contains(.maskAlternate)
+        default:
+            return CGEventSource.keyState(.hidSystemState, key: CGKeyCode(keyCode))
+        }
     }
 
     /// The text in `range`, read with the range-parameterized attribute so the whole document
