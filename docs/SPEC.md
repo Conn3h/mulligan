@@ -1306,9 +1306,14 @@ formatting, typing, or ended without typing (`.failed`, `.focusMoved`, a deliver
 mutates anything, and on a confirmed `.landed` calls `DictationEraser.recordTyped` with them,
 the delivered string, the caret after the insert (AX path: the verified end; paste path: read
 once after the paste completes, below), `landedAt`, the epoch, and a snapshot of
-`lastInjection` from before this insert. One level only: a new landing replaces the record,
-and any erase attempt that gets past the "nothing to erase" check clears it, whatever the
-outcome.
+`lastInjection` from before this insert. If the input epoch moved while the text was landing
+(a click during a paste's settle), the focus and caret read now may belong to other text, so
+the record is kept without element, window and caret; the unchanged-input rule then refuses
+it. Each record also carries the delivery generation current when its insert began
+(`supersede()` bumps it); only a record of the current generation clears `superseded`, so an
+older paste settling after a newer delivery began cannot make itself erasable again. One
+level only: a new landing replaces the record, and any erase attempt that gets past the
+"nothing to erase" check clears it, whatever the outcome.
 
 **One mutation at a time.** `TextInjector.insert` and `DictationEraser.eraseLast` run on one
 serial lane (a chained main-actor task held by `TextInjector`): each awaits the previous
@@ -1362,22 +1367,31 @@ enum ErasePlan: Equatable {
 `AXUIElementSetMessagingTimeout` of 1 s, set once at launch on the system-wide element (the
 default is about 6 s, which would freeze the main actor, the event tap and the controller's
 timers). Not shorter: the insert path shares it, and an AX write that times out on Sotto's
-side but still lands in a slow app would fall back to a paste and type the text twice. Before any key is
-posted, wait (bounded to 1 s) until the erase modifier is physically up
-(`CGEventSource.keyState` by keycode), so no posted key can be read together with a held
-Command; push to talk is still down, so every posted key is built from a `.privateState`
-source with its flags set explicitly to empty.
+side but still lands in a slow app would fall back to a paste and type the text twice.
+
+The eraser plans once (a refusal returns at once), then waits until the erase modifier is
+physically up (`CGEventSource.keyState` by keycode, bounded to 1 s; still down at the bound →
+`.failed`, nothing posted), so no posted key can be read together with a held Command, and
+then **plans again from a fresh read**: the user may have moved the caret during the wait.
+Push to talk is still down, so every posted key is built from a `.privateState` source with
+its flags set explicitly to empty.
 
 - `.deleteRange`: first try AX alone: set `kAXSelectedTextRangeAttribute` to the range, read
   it back, and require it to equal the range exactly; then set `kAXSelectedTextAttribute` to
   `""` and poll (up to 150 ms, as §6.8) for the caret at `location` with the length shrunk by
-  `n`. If the write did not verify **and** the selection still exactly equals the range, post
-  one backspace (which deletes only that selection) and poll again. Any read-back that does
+  `n`. If the write did not verify, post one backspace (which deletes only the selection) and
+  poll again, but only after checking, right before posting, that the same app is in front,
+  the input epoch has not moved, and a fresh read shows the recorded element focused with its
+  selection exactly the range and its text exactly the record: the backspace goes to
+  whatever has focus, not to the element. Any read-back that does
   not match exactly → stop and return `.failed` (logged with both ranges). There is no
   counted-backspace fallback on a readable target.
 - `.backspaces(count)`: post key-down/key-up pairs of kVK_Delete (marked, empty flags) in
   chunks of 10, yielding 2 ms between chunks. Before each chunk, re-check the epoch and the
-  frontmost pid; a change stops the run with `.interrupted`. Log the count posted, not the text.
+  frontmost pid against the record's; a change stops the run with `.interrupted`. Posting
+  reports how many keys it actually managed; a shortfall stops the run (`.interrupted`, or
+  `.failed` when nothing was posted), so a failed event creation is never reported as
+  erased. Log the count posted, not the text.
 
 The erase honours a cancellation token: the controller revokes it on `eraseTimeout`,
 `deactivate()`, or quit, and the eraser checks it before every AX write and every chunk, so an
@@ -1425,7 +1439,8 @@ so there is never a gap in which nothing owns it.
   `.error(outcome.message)`, which auto-clears after `errorDisplayDuration`; no restart,
   because typing a replacement for text that was not removed would duplicate it.
 - Release, `reloadHotkey()` and `deactivate()` already drop a pending hotkey press, so a
-  release during `.erasing` means "erase only". `deactivate()` also revokes the eraser's token.
+  release during `.erasing` means "erase only". `deactivate()` also revokes the eraser's
+  token, and clears an erase requested on an utterance still unwinding, so it never starts.
   A Record-button press during `.erasing` is ignored like any press during a terminating
   session that is not the hotkey's.
 - HUD text for `.erasing`: "Erasing…".
