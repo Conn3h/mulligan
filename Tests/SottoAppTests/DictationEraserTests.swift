@@ -22,6 +22,11 @@ final class FakeEraseTarget: EraseTarget {
     var onPost: ((Int) -> Void)?
     /// When set, `postBackspaces` manages at most this many per call (event creation failed).
     var postLimit: Int?
+    /// When set, the fake is a real text field (ASCII only): reads, AX deletes and backspaces
+    /// all act on this text and `currentSelection`.
+    var field: String?
+    var fieldElement: AXElementID?
+    var fieldWindow: AXElementID?
 
     private(set) var selects: [CFRange] = []
     private(set) var deletes = 0
@@ -38,6 +43,13 @@ final class FakeEraseTarget: EraseTarget {
     func readBack(utf16Length: Int) -> ReadBack {
         reads += 1
         onReadBack?(reads)
+        if let field, let fieldElement, let selection = currentSelection {
+            let text = field as NSString
+            let end = selection.location + selection.length
+            let preceding = end >= utf16Length && end <= text.length
+                ? text.substring(with: NSRange(location: end - utf16Length, length: utf16Length)) : nil
+            return .readable(element: fieldElement, window: fieldWindow, selection: selection, preceding: preceding)
+        }
         if case let .readable(element, window, _, preceding) = read, let currentSelection {
             return .readable(element: element, window: window, selection: currentSelection, preceding: preceding)
         }
@@ -55,7 +67,11 @@ final class FakeEraseTarget: EraseTarget {
     func deleteSelection(in element: AXElementID) -> Bool {
         deletes += 1
         if deleteApplies {
-            collapseSelection()
+            if field != nil, let selection = currentSelection, selection.length > 0 {
+                backspaceInField()
+            } else {
+                collapseSelection()
+            }
         }
         onDelete?()
         return true
@@ -63,17 +79,39 @@ final class FakeEraseTarget: EraseTarget {
 
     func selection(in element: AXElementID) -> CFRange? { currentSelection }
 
-    func characterCount(in element: AXElementID) -> Int? { count }
+    func characterCount(in element: AXElementID) -> Int? {
+        if let field {
+            return (field as NSString).length
+        }
+        return count
+    }
 
     func postBackspaces(_ count: Int) -> Int {
         let managed = min(count, postLimit ?? count)
         posted.append(managed)
         postedAt.append(ContinuousClock().now)
-        if managed > 0 {
+        if field != nil {
+            for _ in 0..<managed {
+                backspaceInField()
+            }
+        } else if managed > 0 {
             collapseSelection()
         }
         onPost?(posted.count)
         return managed
+    }
+
+    /// One backspace in the modelled field: deletes the selection, or the character before
+    /// the caret.
+    private func backspaceInField() {
+        guard let text = field.map({ $0 as NSString }), let selection = currentSelection else {
+            return
+        }
+        let range = selection.length > 0
+            ? NSRange(location: selection.location, length: selection.length)
+            : NSRange(location: selection.location - 1, length: selection.location > 0 ? 1 : 0)
+        field = text.replacingCharacters(in: range, with: "")
+        currentSelection = CFRange(location: range.location, length: 0)
     }
 
     func isKeyDown(_ keyCode: Int64) -> Bool {
@@ -244,14 +282,16 @@ struct DictationEraserTests {
         #expect(target.posted == [1])
     }
 
-    @Test func deleteRangeStopsWhenTheSelectionCannotBeSet() async {
+    /// A field that will not select falls back to checked backspaces; one that does not show
+    /// them landing (this static fake) stops after the first burst.
+    @Test func checkedBackspacesThatDoNotShowUpStopAfterOneBurst() async {
         let (eraser, target, _, _) = makeEraser()
         target.selectSucceeds = false
         readsBack(target)
         _ = typed(readable: true, eraser: eraser)
-        #expect(await eraser.eraseLast(token: EraseToken()) == .failed)
+        #expect(await eraser.eraseLast(token: EraseToken()) == .interrupted)
         #expect(target.deletes == 0)
-        #expect(target.posted.isEmpty)
+        #expect(target.posted == [10])
     }
 
     @Test func deleteRangeNeverFallsBackToCountedBackspaces() async {
@@ -505,5 +545,72 @@ struct DictationEraserTests {
         _ = typed(readable: true, eraser: eraser)
         #expect(await eraser.eraseLast(token: EraseToken()) == .failed)
         #expect(target.posted.isEmpty)
+    }
+
+    // MARK: Fields that read but will not take a selection (the ChatGPT app, 2026-09-27)
+
+    private let older = "Older text."
+    private let latest = " Hello there, friend."
+
+    /// A readable field holding older text and then the dictation, caret at the end, whose
+    /// selection cannot be set.
+    private func unselectableField(_ eraser: DictationEraser, _ target: FakeEraseTarget) {
+        target.field = older + latest
+        target.fieldElement = field
+        target.fieldWindow = window
+        target.selectSucceeds = false
+        let end = (older + latest).utf16.count
+        target.currentSelection = CFRange(location: end, length: 0)
+        eraser.recordTyped(TypedDictation(
+            text: latest, processID: 42, element: field, window: window, caretEnd: end,
+            landedAt: ContinuousClock().now, previousInjection: nil, inputEpoch: eraser.inputEpoch,
+            generation: eraser.deliveryGeneration
+        ))
+    }
+
+    @Test func anUnselectableFieldIsErasedWithCheckedBackspaces() async {
+        let (eraser, target, _, _) = makeEraser()
+        unselectableField(eraser, target)
+        #expect(await eraser.eraseLast(token: EraseToken()) == .erased)
+        #expect(target.field == older)
+        #expect(target.posted == [10, 10, 1])
+    }
+
+    @Test func checkedBackspacesStopWhenTheFieldChangesMidRun() async {
+        let (eraser, target, _, _) = makeEraser()
+        unselectableField(eraser, target)
+        target.onPost = { calls in
+            if calls == 1, let text = target.field, let caret = target.currentSelection {
+                // The app inserts a character at the caret (autocomplete, another writer).
+                target.field = (text as NSString).replacingCharacters(in: NSRange(location: caret.location, length: 0), with: "X")
+                target.currentSelection = CFRange(location: caret.location + 1, length: 0)
+            }
+        }
+        #expect(await eraser.eraseLast(token: EraseToken()) == .interrupted)
+        #expect(target.posted == [10])
+        #expect(target.field?.hasPrefix(older) == true)
+    }
+
+    @Test func checkedBackspacesStopOnInput() async {
+        let (eraser, target, monitor, _) = makeEraser()
+        unselectableField(eraser, target)
+        target.onPost = { _ in monitor.fire() }
+        #expect(await eraser.eraseLast(token: EraseToken()) == .interrupted)
+        #expect(target.posted == [10])
+    }
+
+    @Test func aSelectionThatLandsLateStopsBeforeAnyBackspace() async {
+        let (eraser, target, _, _) = makeEraser()
+        unselectableField(eraser, target)
+        // The select call reports failure but the app applies it a moment later.
+        target.onReadBack = { reads in
+            if reads == 3 {
+                let length = self.latest.utf16.count
+                target.currentSelection = CFRange(location: self.older.utf16.count, length: length)
+            }
+        }
+        #expect(await eraser.eraseLast(token: EraseToken()) == .failed)
+        #expect(target.posted.isEmpty)
+        #expect(target.field == older + latest)
     }
 }

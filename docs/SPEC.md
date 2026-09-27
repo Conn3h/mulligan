@@ -1389,7 +1389,13 @@ each burst) the erase modifier is checked again: pressed again meanwhile (a modi
 the input monitor does not see), the erase stops.
 
 - `.deleteRange`: first try AX alone: set `kAXSelectedTextRangeAttribute` to the range, read
-  it back, and require it to equal the range exactly; then set `kAXSelectedTextAttribute` to
+  it back, and require it to equal the range exactly. A field that reads but will not take a
+  selection (the ChatGPT app, found in acceptance 2026-09-27) gets **checked backspaces**
+  instead: bursts of 10, each proven first (focused element ours, caret collapsed exactly
+  after the remaining dictation, the text before it exactly that remainder, no input, same
+  app, erase modifier up) and each verified afterwards (the caret moved back by the burst
+  within 150 ms); any mismatch stops the run. A selection that lands late is non-collapsed at
+  the first check, so nothing is posted. Otherwise, once the selection took: then set `kAXSelectedTextAttribute` to
   `""` and poll (up to 150 ms, as §6.8) for the caret at `location` with the length shrunk by
   `n`. If the write did not verify, post one backspace (which deletes only the selection) and
   poll again, but only after checking, right before posting, that the same app is in front,

@@ -185,8 +185,10 @@ final class DictationEraser: TypingObserver {
         }
         let epoch = inputEpoch
         guard target.select(range, in: element) else {
-            Log.inject.info("erase: selection \(range.location, privacy: .public)+\(range.length, privacy: .public) did not take")
-            return .failed
+            Log.inject.info(
+                "erase: selection \(range.location, privacy: .public)+\(range.length, privacy: .public) did not take; using checked backspaces"
+            )
+            return await checkedBackspaces(from: range.location, element: element, record: record, token: token, epoch: epoch)
         }
         let countBefore = target.characterCount(in: element)
         guard !token.isRevoked else {
@@ -231,6 +233,64 @@ final class DictationEraser: TypingObserver {
         // Last, after the AX reads (each can take a moment): the erase key pressed again
         // meanwhile would turn the backspace into Command-Delete.
         return !eraseModifierIsDown()
+    }
+
+    /// A field that reads but will not take a selection (the ChatGPT app): backspaces in
+    /// bursts, each burst proven first. Before every burst the focused element must be ours,
+    /// the caret collapsed exactly where the remaining dictation ends, the text before it
+    /// exactly that remainder, with no input, no app change and no erase modifier; after each
+    /// burst the field must show it landed. Anything else stops the run.
+    private func checkedBackspaces(
+        from start: Int, element: AXElementID, record: TypedDictation, token: EraseToken, epoch: UInt64
+    ) async -> EraseOutcome {
+        var remaining = record.text
+        var posted = 0
+        while !remaining.isEmpty {
+            guard !token.isRevoked, inputEpoch == epoch, target.frontmostProcessID() == record.processID,
+                  caretFollows(remaining, from: start, in: element), !eraseModifierIsDown()
+            else {
+                Log.inject.info(
+                    "erase: checked backspaces stopped after \(posted, privacy: .public) of \(record.text.count, privacy: .public)"
+                )
+                return posted == 0 ? .failed : .interrupted
+            }
+            let burst = min(Self.chunkSize, remaining.count)
+            let managed = target.postBackspaces(burst)
+            posted += managed
+            remaining = String(remaining.dropLast(managed))
+            guard managed == burst else {
+                Log.inject.error("erase: only \(managed, privacy: .public) of \(burst, privacy: .public) backspaces could be posted")
+                return posted == 0 ? .failed : .interrupted
+            }
+            guard await awaitCaret(following: remaining, from: start, in: element) else {
+                Log.inject.info("erase: the field did not show the backspaces landing; stopping after \(posted, privacy: .public)")
+                return .interrupted
+            }
+        }
+        return .erased
+    }
+
+    /// The focused element is ours and its caret sits, collapsed, right after `remaining`,
+    /// which is exactly the text before it.
+    private func caretFollows(_ remaining: String, from start: Int, in element: AXElementID) -> Bool {
+        let units = remaining.utf16.count
+        guard case let .readable(focused, _, selection, preceding) = target.readBack(utf16Length: units),
+              focused == element, selection.length == 0, selection.location == start + units
+        else {
+            return false
+        }
+        return units == 0 || preceding.map { $0.utf16.elementsEqual(remaining.utf16) } == true
+    }
+
+    private func awaitCaret(following remaining: String, from start: Int, in element: AXElementID) async -> Bool {
+        let deadline = clock.now + Self.verifyTimeout
+        while !caretFollows(remaining, from: start, in: element) {
+            guard clock.now < deadline else {
+                return false
+            }
+            await pause(Self.verifyPoll)
+        }
+        return true
     }
 
     /// The caret sits at the range's start and, when the field reports a length, it shrank by
