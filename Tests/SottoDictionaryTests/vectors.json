@@ -566,5 +566,157 @@
         "count": 1
       }
     ]
+  },
+  {
+    "name": "write text already present is not duplicated (next -> Next.js)",
+    "entries": [
+      {
+        "kind": "correction",
+        "hear": "next",
+        "write": "Next.js"
+      }
+    ],
+    "input": "I use Next.js daily.",
+    "expected": "I use Next.js daily.",
+    "applied": [
+      {
+        "from": "Next.js",
+        "to": "Next.js",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "write text already present is not duplicated (cloud -> Cloud Code)",
+    "entries": [
+      {
+        "kind": "correction",
+        "hear": "cloud",
+        "write": "Cloud Code"
+      }
+    ],
+    "input": "Open Cloud Code now.",
+    "expected": "Open Cloud Code now.",
+    "applied": [
+      {
+        "from": "Cloud Code",
+        "to": "Cloud Code",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "unfenced write occurrence still duplicates as before",
+    "entries": [
+      {
+        "kind": "correction",
+        "hear": "next",
+        "write": "Next.js"
+      }
+    ],
+    "input": "Next.jsx is a file extension.",
+    "expected": "Next.js.jsx is a file extension.",
+    "applied": [
+      {
+        "from": "Next",
+        "to": "Next.js",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "same-length match still recases (pure recasing)",
+    "entries": [
+      {
+        "kind": "correction",
+        "hear": "codex",
+        "write": "Codex"
+      }
+    ],
+    "input": "codex",
+    "expected": "Codex",
+    "applied": [
+      {
+        "from": "codex",
+        "to": "Codex",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "same-length match already correctly cased still fires",
+    "entries": [
+      {
+        "kind": "correction",
+        "hear": "codex",
+        "write": "Codex"
+      }
+    ],
+    "input": "Codex",
+    "expected": "Codex",
+    "applied": [
+      {
+        "from": "Codex",
+        "to": "Codex",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "already-correct write followed by a possessive apostrophe is not duplicated",
+    "entries": [
+      {
+        "kind": "correction",
+        "hear": "next",
+        "write": "Next.js"
+      }
+    ],
+    "input": "I love Next.js's plugins.",
+    "expected": "I love Next.js's plugins.",
+    "applied": [
+      {
+        "from": "Next.js",
+        "to": "Next.js",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "write text already present in the wrong case is recased, not duplicated",
+    "entries": [
+      {
+        "kind": "correction",
+        "hear": "cloud",
+        "write": "Cloud Code"
+      }
+    ],
+    "input": "open cloud code now",
+    "expected": "open Cloud Code now",
+    "applied": [
+      {
+        "from": "cloud code",
+        "to": "Cloud Code",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "name": "already-present target found through an expanding case fold is not duplicated",
+    "entries": [
+      {
+        "kind": "correction",
+        "hear": "cloud",
+        "write": "Cloud Stra\u00dfe"
+      }
+    ],
+    "input": "Open Cloud STRASSE now",
+    "expected": "Open Cloud Stra\u00dfe now",
+    "applied": [
+      {
+        "from": "Cloud STRASSE",
+        "to": "Cloud Stra\u00dfe",
+        "count": 1
+      }
+    ]
   }
 ]

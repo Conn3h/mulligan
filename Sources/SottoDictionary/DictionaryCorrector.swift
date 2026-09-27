@@ -29,7 +29,9 @@ public struct AppliedCorrection: Codable, Hashable, Sendable {
 /// spaced and hyphenated forms all match, case-insensitively; a match must not be fenced by
 /// a letter, digit, combining mark or hyphen on either side (apostrophes are boundaries, so
 /// possessives are corrected); a single left-to-right scan resolves overlaps by longest
-/// match, ties going to the earlier entry, and never re-matches replacement text.
+/// match, ties going to the earlier entry, and never re-matches replacement text; when the
+/// entry's `write` text is already present beyond the trigger's own span, the whole existing
+/// span is replaced (so it is recased, never duplicated) and scanning resumes past it.
 public struct DictionaryCorrector: Sendable {
     /// A trigger pattern paired with its replacement, in the order its owning entry
     /// appears in `entries`. Only enabled `.correction` entries with a non-empty trigger
@@ -54,6 +56,10 @@ public struct DictionaryCorrector: Sendable {
     struct CompiledRule: Sendable {
         let regex: NSRegularExpression
         let write: String
+        /// NFC form of `write`, precomputed once for the already-written check below (the
+        /// input is NFC-normalised at the top of `apply`, so comparing against a raw,
+        /// possibly-decomposed `write` could silently never match).
+        let normalizedWrite: String
     }
 
     #if canImport(os)
@@ -164,13 +170,22 @@ public struct DictionaryCorrector: Sendable {
 
             if let bestIndex, let bestRange {
                 let rule = rules[bestIndex]
+                // The text may already read as this entry's `write` beyond the trigger's own
+                // span (e.g. `next -> Next.js` seeing "Next.js"). Replacing only the trigger
+                // would duplicate the rest, so the whole existing span is replaced instead:
+                // idempotent, and still fixes its casing. Scanning resumes past it, so
+                // nothing -- this rule or any other -- re-matches inside it.
+                let already = Self.alreadyReadsAsWrite(
+                    normalized, matchEnd: bestRange.upperBound, start: bestRange.lowerBound, write: rule.normalizedWrite
+                )
+                let replaced = already ?? bestRange
                 output += rule.write
                 if firstFrom[bestIndex] == nil {
-                    firstFrom[bestIndex] = String(normalized[bestRange])
+                    firstFrom[bestIndex] = String(normalized[replaced])
                     firstFireOrder.append(bestIndex)
                 }
                 counts[bestIndex, default: 0] += 1
-                cursor = bestRange.upperBound
+                cursor = replaced.upperBound
             } else {
                 output.append(normalized[cursor])
                 cursor = normalized.index(after: cursor)
@@ -197,7 +212,8 @@ public struct DictionaryCorrector: Sendable {
         for candidate in candidates {
             do {
                 let regex = try NSRegularExpression(pattern: candidate.pattern, options: [.caseInsensitive])
-                rules.append(CompiledRule(regex: regex, write: candidate.write))
+                let normalizedWrite = candidate.write.precomposedStringWithCanonicalMapping
+                rules.append(CompiledRule(regex: regex, write: candidate.write, normalizedWrite: normalizedWrite))
             } catch {
                 failures.append(CompileFailure(pattern: candidate.pattern, reason: error.localizedDescription))
             }
@@ -228,6 +244,34 @@ public struct DictionaryCorrector: Sendable {
 
         let escapedParts = parts.map { NSRegularExpression.escapedPattern(for: String($0)) }
         return escapedParts.joined(separator: "[\\s\\-]*")
+    }
+
+    // MARK: - Already-written detection
+
+    /// If `text` already reads as `write` (case-insensitively) starting at `start`, and that
+    /// occurrence reaches past `matchEnd` (the trigger's own match end) with a proper fence
+    /// on its far side, returns the occurrence's range so the caller replaces all of it
+    /// rather than only the trigger's part. A `write` occurrence no longer than the trigger's own match (e.g.
+    /// `codex -> Codex` matching "codex") is not an already-written span -- there is nothing
+    /// beyond the match that would be duplicated, so it still recases normally.
+    ///
+    /// The near-side fence is not re-checked here: `start` is the trigger match's own start,
+    /// already fenced by `fencesAllow` before this is called.
+    private static func alreadyReadsAsWrite(
+        _ text: String,
+        matchEnd: String.Index,
+        start: String.Index,
+        write: String
+    ) -> Range<String.Index>? {
+        guard !write.isEmpty else { return nil }
+        // Search rather than slice `write.count` characters: a case fold can change the
+        // length ("Straße" matches "STRASSE").
+        guard let found = text.range(of: write, options: [.caseInsensitive, .anchored], range: start..<text.endIndex),
+              found.upperBound > matchEnd
+        else { return nil }
+        let end = found.upperBound
+        if end < text.endIndex, isFenceBreaker(text[end]) { return nil }
+        return start..<end
     }
 
     // MARK: - Fencing

@@ -175,7 +175,7 @@ struct DictationControllerTests {
         #expect(harness.controller.liveTaskCount == 0)
     }
 
-    @Test func pressWhileFinishingIsIgnored() async throws {
+    @Test func pressWhileFinishingStartsOnceItEnds() async throws {
         let finishGate = Gate(open: false)
         let engine = FakeEngine(.init(finishGate: finishGate))
         let harness = Harness(engines: [engine])
@@ -192,8 +192,49 @@ struct DictationControllerTests {
         #expect(harness.capture.startCalls == 1)
 
         await finishGate.open()
-        try await settle("idle") { harness.state == .idle }
+        try await settle("queued press listening") { harness.state == .listening }
         #expect(harness.received.count == 1)
+        #expect(harness.factory.made.count == 2)
+        try await harness.releaseAndIdle()
+    }
+
+    @Test func reloadingTheHotkeyDropsAQueuedPress() async throws {
+        // The new key's monitor never sees the old key's release, so a press queued under
+        // the old key would start recording with nothing held.
+        let finishGate = Gate(open: false)
+        let engine = FakeEngine(.init(finishGate: finishGate))
+        let harness = Harness(engines: [engine])
+        harness.controller.activate()
+        try await harness.pressAndListen()
+
+        harness.hotkey.release()
+        await finishGate.waitForArrival()
+        harness.hotkey.press()
+        harness.controller.reloadHotkey()
+
+        await finishGate.open()
+        try await settle("idle") { harness.state == .idle }
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(harness.state == .idle)
+        #expect(harness.factory.made.count == 1)
+    }
+
+    @Test func pressAndReleaseWhileFinishingIsDropped() async throws {
+        let finishGate = Gate(open: false)
+        let engine = FakeEngine(.init(finishGate: finishGate))
+        let harness = Harness(engines: [engine])
+        harness.controller.activate()
+        try await harness.pressAndListen()
+
+        harness.hotkey.release()
+        await finishGate.waitForArrival()
+        harness.hotkey.press()
+        harness.hotkey.release()
+
+        await finishGate.open()
+        try await settle("idle") { harness.state == .idle }
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(harness.state == .idle)
         #expect(harness.factory.made.count == 1)
     }
 
@@ -497,6 +538,7 @@ struct DictationControllerTests {
         harness.controller.onFinalTranscript = { _, _ in
             deliveryStarted = true
             await deliverGate.pass()
+            return nil
         }
         try await harness.pressAndListen()
 
@@ -535,17 +577,105 @@ struct DictationControllerTests {
         // rather than sitting in .finishing forever (the reported quick-tap wedge).
         let finishGate = Gate(open: false)
         let engine = FakeEngine(.init(finishGate: finishGate))
-        let harness = Harness(engines: [engine], engineFinishTimeout: .milliseconds(150))
+        let harness = Harness(
+            engines: [engine],
+            errorDisplayDuration: .milliseconds(100),
+            engineFinishTimeout: .milliseconds(150)
+        )
         harness.controller.activate()
         try await harness.pressAndListen()
 
         harness.hotkey.release()
         #expect(harness.state == .finishing)
 
-        try await settle("idle after finish timeout", timeout: .seconds(2)) { harness.state == .idle }
+        // Nothing was transcribed before the timeout: say so rather than going quietly idle.
+        try await settle("error after finish timeout", timeout: .seconds(2)) {
+            harness.state == .error(DictationController.transcriptionTimedOutMessage)
+        }
         #expect(await engine.cancelCalls >= 1)
         #expect(harness.received.isEmpty)
+        try await settle("idle after the error", timeout: .seconds(2)) { harness.state == .idle }
         #expect(harness.controller.liveTaskCount == 0)
+    }
+
+    @Test func finishTimeoutGrowsWithTheHoldUpToACap() {
+        let base = Duration.seconds(2)
+        #expect(DictationController.finishTimeout(base: base, heldSeconds: 0) == base)
+        #expect(DictationController.finishTimeout(base: base, heldSeconds: 12) > .seconds(4))
+        #expect(DictationController.finishTimeout(base: base, heldSeconds: 180) == DictationController.finishTimeoutCap)
+    }
+
+    // MARK: Filler-only transcripts
+
+    @Test func fillerOnlyTranscriptIsDiscarded() async throws {
+        let engine = FakeEngine(.init(finalText: "Mm-."))
+        let harness = Harness(engines: [engine])
+        harness.controller.activate()
+        try await harness.pressAndListen()
+        try await harness.releaseAndIdle()
+        #expect(harness.received.isEmpty)
+        #expect(await engine.finishCalls == 1)
+    }
+
+    @Test func quietOneWordAnswerIsDelivered() async throws {
+        // The level stays low throughout: a quiet "yes" must still be typed.
+        let engine = FakeEngine(.init(finalText: "Yes."))
+        let harness = Harness(engines: [engine])
+        harness.controller.activate()
+        try await harness.pressAndListen()
+        for level: Float in [0.2, 0.25, 0.22] {
+            #expect(harness.capture.emitLevel(level))
+        }
+        try await Task.sleep(for: .milliseconds(30))
+        try await harness.releaseAndIdle()
+        #expect(harness.received.map(\.text) == ["Yes."])
+    }
+
+    @Test func captureInterruptionDeliversTheTextThenShowsItsMessage() async throws {
+        let engine = FakeEngine(.init(finalText: "said before the change"))
+        let harness = Harness(engines: [engine], errorDisplayDuration: .milliseconds(100))
+        harness.controller.activate()
+        try await harness.pressAndListen()
+
+        #expect(harness.capture.emitInterruption("The microphone changed."))
+        try await settle("error") { harness.state == .error("The microphone changed.") }
+        // Everything said before the interruption is still delivered.
+        #expect(harness.received.map(\.text) == ["said before the change"])
+        #expect(await engine.finishCalls == 1)
+        try await settle("idle after the error") { harness.state == .idle }
+        #expect(harness.controller.liveTaskCount == 0)
+    }
+
+    @Test func deliveryNoticeIsShownAsAnError() async throws {
+        let engine = FakeEngine(.init(finalText: "meant for another app"))
+        let harness = Harness(engines: [engine], errorDisplayDuration: .milliseconds(100))
+        harness.deliveryNotice = "Not typed: the text is in History."
+        harness.controller.activate()
+        try await harness.pressAndListen()
+        harness.hotkey.release()
+        try await settle("notice shown") { harness.state == .error("Not typed: the text is in History.") }
+        #expect(harness.received.count == 1)
+        try await settle("idle after the notice") { harness.state == .idle }
+    }
+
+    // MARK: Sources
+
+    @Test func hotkeyReleaseDoesNotEndAButtonRecording() async throws {
+        let engine = FakeEngine(.init(finalText: "from the window"))
+        let harness = Harness(engines: [engine])
+        harness.controller.activate()
+
+        harness.controller.startButtonRecording()
+        try await settle("listening") { harness.state == .listening }
+        // The user taps the push-to-talk key (Right Command for Command-Tab, say).
+        harness.hotkey.press()
+        harness.hotkey.release()
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(harness.state == .listening)
+
+        harness.controller.stopButtonRecording()
+        try await settle("idle") { harness.state == .idle }
+        #expect(harness.received.map(\.text) == ["from the window"])
     }
 }
 

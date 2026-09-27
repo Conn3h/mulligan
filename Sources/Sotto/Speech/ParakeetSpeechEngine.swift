@@ -1,6 +1,7 @@
 import AVFoundation
 import FluidAudio
 import Foundation
+import SottoDictionary
 
 /// NVIDIA Parakeet TDT (CoreML, via FluidAudio) behind the engine seam. Experimental, for
 /// side-by-side accuracy testing against `AppleSpeechEngine`. One instance serves one
@@ -52,8 +53,8 @@ actor ParakeetSpeechEngine: TranscriptionEngine {
     /// rescorer may swap it. The library's size-based default (0.55 for a dictionary this
     /// size) let "alright" become Playwright (0.60), "make sure" become Maestro (0.56) and
     /// "latest transcripts" become "Vitest TypeScript" (0.67, 0.64). At 0.75 those all fall
-    /// through while a genuine near miss such as "vitess" (0.83) still qualifies. The
-    /// combined acoustic-plus-string confidence gate moves up with it.
+    /// through. The combined acoustic-plus-string confidence gate moves up with it. Short
+    /// single-word terms get a stricter per-term floor on top; see `BiasStrictness`.
     private static let minBiasSimilarity: Float = 0.75
     private static let minBiasCombinedConfidence: Float = 0.75
 
@@ -223,7 +224,9 @@ actor ParakeetSpeechEngine: TranscriptionEngine {
             return
         }
         let vocabulary = CustomVocabularyContext(
-            terms: biasPhrases.map { CustomVocabularyTerm(text: $0) },
+            terms: biasPhrases.map {
+                CustomVocabularyTerm(text: $0, minSimilarity: BiasStrictness.minimumSimilarity(for: $0))
+            },
             minCtcScore: Self.minBiasCtcScore,
             minSimilarity: Self.minBiasSimilarity,
             minCombinedConfidence: Self.minBiasCombinedConfidence

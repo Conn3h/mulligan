@@ -25,7 +25,9 @@ private struct PipelineHarness {
     init(
         cleanupEnabled: Bool = false,
         soundEnabled: Bool = false,
-        entries: [DictionaryEntry] = []
+        entries: [DictionaryEntry] = [],
+        injectOutcome: TextInjector.Outcome = .landed,
+        frontmostProcessID: pid_t? = nil
     ) {
         let recorder = PipelineRecorder()
         let settings = UtterancePipeline.SettingsSnapshot(
@@ -39,8 +41,12 @@ private struct PipelineHarness {
             readSettings: { settings },
             makeCorrector: { DictionaryCorrector(entries: entries) },
             recordHistory: { run in recorder.recorded.append(run) },
-            inject: { text in recorder.injected.append(text) },
-            playEndSound: { recorder.soundPlays += 1 }
+            inject: { text, _ in
+                recorder.injected.append(text)
+                return injectOutcome
+            },
+            playEndSound: { recorder.soundPlays += 1 },
+            readFrontmostProcessID: { frontmostProcessID }
         )
     }
 
@@ -52,9 +58,10 @@ private struct PipelineHarness {
 private func makeUtterance(
     source: UtteranceSource,
     heldSeconds: TimeInterval = 1.5,
-    releasedAt: Date = Date(timeIntervalSince1970: 1_788_256_800)
+    releasedAt: Date = Date(timeIntervalSince1970: 1_788_256_800),
+    targetProcessID: pid_t? = nil
 ) -> Utterance {
-    Utterance(source: source, heldSeconds: heldSeconds, releasedAt: releasedAt)
+    Utterance(source: source, heldSeconds: heldSeconds, releasedAt: releasedAt, targetProcessID: targetProcessID)
 }
 
 private let cloudCodeCorrection = DictionaryEntry.correction(hear: "cloud code", write: "Claude Code")
@@ -62,6 +69,52 @@ private let cloudCodeCorrection = DictionaryEntry.correction(hear: "cloud code",
 @MainActor
 @Suite(.serialized)
 struct UtterancePipelineTests {
+    @Test func focusMovedToAnotherAppSavesToHistoryWithoutTyping() async {
+        let harness = PipelineHarness(soundEnabled: true, frontmostProcessID: 200)
+
+        let notice = await harness.pipeline.process(
+            raw: "meant for the editor", utterance: makeUtterance(source: .hotkey, targetProcessID: 100)
+        )
+
+        #expect(harness.injected.isEmpty)
+        #expect(harness.recorded.map(\.text) == ["meant for the editor"])
+        #expect(notice == UtterancePipeline.focusMovedMessage)
+        #expect(harness.soundPlays == 0)
+    }
+
+    @Test func sameAppStillFrontmostIsTyped() async {
+        let harness = PipelineHarness(soundEnabled: true, frontmostProcessID: 100)
+
+        let notice = await harness.pipeline.process(
+            raw: "typed here", utterance: makeUtterance(source: .hotkey, targetProcessID: 100)
+        )
+
+        #expect(harness.injected == ["typed here"])
+        #expect(notice == nil)
+        #expect(harness.soundPlays == 1)
+    }
+
+    @Test func focusMovingDuringInjectionReportsItAndSkipsTheSound() async {
+        let harness = PipelineHarness(soundEnabled: true, injectOutcome: .focusMoved)
+
+        let notice = await harness.pipeline.process(raw: "not here", utterance: makeUtterance(source: .hotkey))
+
+        #expect(harness.recorded.map(\.text) == ["not here"])
+        #expect(notice == UtterancePipeline.focusMovedMessage)
+        #expect(harness.soundPlays == 0)
+    }
+
+    @Test func failedInjectionReportsAndSkipsTheLandedSound() async {
+        let harness = PipelineHarness(soundEnabled: true, injectOutcome: .failed)
+
+        let notice = await harness.pipeline.process(raw: "lost text", utterance: makeUtterance(source: .hotkey))
+
+        #expect(harness.injected == ["lost text"])
+        #expect(harness.recorded.map(\.text) == ["lost text"])
+        #expect(notice == UtterancePipeline.insertFailedMessage)
+        #expect(harness.soundPlays == 0)
+    }
+
     @Test func buttonUtteranceIsRecordedButNeverInjected() async {
         let harness = PipelineHarness()
 

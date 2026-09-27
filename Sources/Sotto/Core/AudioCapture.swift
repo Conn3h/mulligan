@@ -9,19 +9,23 @@ protocol AudioCapturing: AnyObject, Sendable {
     func start(
         outputFormat: AVAudioFormat,
         onBuffer: @escaping @Sendable (AudioChunk) -> Void,
-        onLevel: @escaping @Sendable (Float) -> Void
+        onLevel: @escaping @Sendable (Float) -> Void,
+        onInterruption: @escaping @Sendable (String) -> Void
     ) throws
     func stop()
 }
 
 enum AudioCaptureError: LocalizedError {
     case noInputDevice
+    case inputNotReady
     case converterUnavailable(from: String, to: String)
 
     var errorDescription: String? {
         switch self {
         case .noInputDevice:
             "No microphone is available."
+        case .inputNotReady:
+            "The microphone is still switching. Try again."
         case .converterUnavailable(let from, let to):
             "Audio cannot be converted from \(from) to \(to)."
         }
@@ -31,7 +35,7 @@ enum AudioCaptureError: LocalizedError {
 /// `AVAudioEngine` input tap in the node's native format, converted to the engine's format
 /// when they differ. Nothing mutable is shared with the audio thread: `start()` builds one
 /// immutable `Session` that the tap closure captures, and the class itself only holds the
-/// engine and a running flag behind a lock that the caller's thread takes.
+/// running engine and its callbacks behind a lock.
 final class AudioCapture: AudioCapturing {
     private static let tapFrameCount: AVAudioFrameCount = 2048
     /// Extra output frames beyond frames x rate ratio, so a resampler's rounding never
@@ -43,10 +47,12 @@ final class AudioCapture: AudioCapturing {
     private struct Session {
         let converter: AVAudioConverter?
         let outputFormat: AVAudioFormat
+        let clock: BufferClock
         let onBuffer: @Sendable (AudioChunk) -> Void
         let onLevel: @Sendable (Float) -> Void
 
         func process(_ buffer: AVAudioPCMBuffer) {
+            clock.mark()
             onLevel(AudioCapture.meterLevel(of: buffer))
             let delivered: AVAudioPCMBuffer?
             if let converter {
@@ -61,93 +67,421 @@ final class AudioCapture: AudioCapturing {
         }
     }
 
-    private struct Storage {
-        var engine: AVAudioEngine?
-        var isRunning = false
+    /// What a capture was started with; fixed for its whole life, across restarts.
+    private struct Configuration {
+        let outputFormat: AVAudioFormat
+        let onBuffer: @Sendable (AudioChunk) -> Void
+        let onLevel: @Sendable (Float) -> Void
+        let onInterruption: @Sendable (String) -> Void
     }
 
+    /// One started engine. Built inside the lock (an engine may only enter the lock's region
+    /// as a fresh value, and SPEC allows no unchecked Sendable here), but retries wait outside
+    /// it, so a `stop()` waits for at most one engine build.
+    private struct LiveEngine {
+        let engine: AVAudioEngine
+        let observer: NSObjectProtocol
+        let clock: BufferClock
+        let native: AVAudioFormat
+        let id: UUID
+        let startedAt: UInt64
+    }
+
+    private struct Running {
+        let configuration: Configuration
+        /// Nil while a restart is between engines.
+        var live: LiveEngine?
+        /// The engine a configuration change or silence check may act on: the live engine's
+        /// id, or a restart's ticket while it is between engines. A queued notification for a
+        /// torn-down engine (or a new one at a reused address) never matches.
+        var currentID: UUID
+        /// Restarts forced by the silence check; bounded so a dead input ends the utterance
+        /// instead of restarting forever.
+        var silenceRestarts = 0
+        /// Every restart (configuration change or silence) since audio last flowed. A storm of
+        /// configuration changes replaces each engine before its silence check can count, so
+        /// this separate budget ends the churn.
+        var restartsWithoutAudio = 0
+    }
+
+    /// What the log needs from a newly started engine, readable outside the lock.
+    private struct StartedEngine: Sendable {
+        let id: UUID
+        let nativeRate: Double
+        let nativeChannels: UInt32
+        let converting: Bool
+
+        init(_ live: LiveEngine, outputFormat: AVAudioFormat) {
+            id = live.id
+            nativeRate = live.native.sampleRate
+            nativeChannels = live.native.channelCount
+            converting = live.native != outputFormat
+        }
+    }
+
+    private enum SilenceVerdict {
+        case healthy
+        case restart(silentMillis: UInt64)
+        case giveUp(@Sendable (String) -> Void)
+        case gone
+    }
+
+    private struct Storage {
+        var running: Running?
+    }
+
+    static let microphoneChangedMessage = "The microphone changed and could not be restarted. Try again."
+    /// A device that is still switching (Bluetooth turning off, a headset just connected) can
+    /// report a format the hardware does not have yet, or refuse to start. Starts and restarts
+    /// retry on a fresh engine before giving up.
+    private static let engineAttempts = 4
+    private static let engineRetryDelay: TimeInterval = 0.15
+    /// An engine can start "successfully" on a device mid-switch and never deliver a buffer,
+    /// with no configuration change to say so. Buffers flow even in silence, so none for this
+    /// long means capture is dead and is moved to a fresh engine.
+    private static let firstBufferDeadline: UInt64 = 700_000_000
+    private static let bufferGapDeadline: UInt64 = 1_000_000_000
+    private static let silenceCheckInterval: TimeInterval = 0.35
+    private static let maxSilenceRestarts = 3
+    private static let maxRestartsWithoutAudio = 12
+
     private let storage = Mutex(Storage())
+    /// Configuration changes and silence checks are handled here. The observer itself runs
+    /// on the posting thread (queue nil) and only enqueues: an observer registered with a
+    /// queue makes the poster wait for it, and the handler takes the lock that `start` holds
+    /// while the engine may be posting, which could deadlock.
+    private let notificationQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        queue.name = "com.conn3h.sotto.audio-configuration"
+        return queue
+    }()
 
     init() {}
 
+    /// Builds a fresh `AVAudioEngine` for every start. A cached engine kept the input device
+    /// and format it first saw: after AirPods connected or the input changed between holds it
+    /// could hand the tap a stale format, and one failed start poisoned every later press
+    /// until relaunch. A start that fails because the input is mid-switch is retried.
     func start(
         outputFormat: AVAudioFormat,
         onBuffer: @escaping @Sendable (AudioChunk) -> Void,
-        onLevel: @escaping @Sendable (Float) -> Void
+        onLevel: @escaping @Sendable (Float) -> Void,
+        onInterruption: @escaping @Sendable (String) -> Void
     ) throws {
-        try storage.withLock { storage in
-            if storage.isRunning {
+        if storage.withLock({ $0.running != nil }) {
+            Log.audio.info("capture start ignored: already running")
+            return
+        }
+        let configuration = Configuration(
+            outputFormat: outputFormat, onBuffer: onBuffer, onLevel: onLevel, onInterruption: onInterruption
+        )
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        var lastError: Error = AudioCaptureError.inputNotReady
+        for attempt in 1...Self.engineAttempts {
+            if attempt > 1 {
+                Thread.sleep(forTimeInterval: Self.engineRetryDelay)
+            }
+            let result: Result<StartedEngine, Error>? = storage.withLock { storage in
+                guard storage.running == nil else {
+                    return nil
+                }
+                do {
+                    let live = try makeEngine(for: configuration)
+                    storage.running = Running(configuration: configuration, live: live, currentID: live.id)
+                    return .success(StartedEngine(live, outputFormat: outputFormat))
+                } catch {
+                    return .failure(error)
+                }
+            }
+            switch result {
+            case nil:
                 Log.audio.info("capture start ignored: already running")
                 return
-            }
-            let engine = storage.engine ?? AVAudioEngine()
-            let input = engine.inputNode
-            let native = input.outputFormat(forBus: 0)
-            guard native.sampleRate > 0, native.channelCount > 0 else {
-                Log.audio.error("capture start failed: input node reports no usable format")
-                throw AudioCaptureError.noInputDevice
-            }
-            let needsConversion = native != outputFormat
-            var converter: AVAudioConverter?
-            if needsConversion {
-                guard let made = AVAudioConverter(from: native, to: outputFormat) else {
-                    Log.audio.error(
-                        "capture start failed: no converter from \(native.description, privacy: .public) to \(outputFormat.description, privacy: .public)"
-                    )
-                    throw AudioCaptureError.converterUnavailable(
-                        from: native.description, to: outputFormat.description
-                    )
-                }
-                converter = made
-            }
-            if native.commonFormat != .pcmFormatFloat32 {
-                Log.audio.error(
-                    "native input format is not Float32 (\(native.commonFormat.rawValue, privacy: .public)); the level meter will stay at zero"
+            case .success(let started):
+                scheduleSilenceCheck(for: started.id)
+                Log.audio.info(
+                    "capture start: native \(started.nativeRate, privacy: .public) Hz x\(started.nativeChannels, privacy: .public) -> engine \(outputFormat.sampleRate, privacy: .public) Hz x\(outputFormat.channelCount, privacy: .public), converting: \(started.converting, privacy: .public), attempt \(attempt, privacy: .public), took \(clock.now - startedAt, privacy: .public)"
                 )
+                return
+            case .failure(let error):
+                lastError = error
+                Log.audio.error(
+                    "capture start attempt \(attempt, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
+                )
+                guard Self.isTransient(error) else {
+                    throw error
+                }
             }
-            let session = Session(
-                converter: converter, outputFormat: outputFormat, onBuffer: onBuffer, onLevel: onLevel
-            )
-            input.installTap(onBus: 0, bufferSize: Self.tapFrameCount, format: native) { buffer, _ in
-                session.process(buffer)
-            }
-            engine.prepare()
-            do {
-                try engine.start()
-            } catch {
-                input.removeTap(onBus: 0)
-                Log.audio.error("audio engine start failed: \(error.localizedDescription, privacy: .public)")
-                throw error
-            }
-            storage.engine = engine
-            storage.isRunning = true
-            Log.audio.info(
-                "capture start: native \(native.sampleRate, privacy: .public) Hz x\(native.channelCount, privacy: .public) -> engine \(outputFormat.sampleRate, privacy: .public) Hz x\(outputFormat.channelCount, privacy: .public), converting: \(needsConversion, privacy: .public)"
-            )
         }
+        // Whatever CoreAudio said, the user can only wait and try again.
+        throw Self.isTransient(lastError) ? AudioCaptureError.inputNotReady : lastError
     }
 
     func stop() {
         storage.withLock { storage in
-            guard storage.isRunning, let engine = storage.engine else {
+            guard let running = storage.running else {
                 return
             }
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
-            storage.isRunning = false
+            if let live = running.live {
+                Self.tearDown(live)
+            }
+            storage.running = nil
             Log.audio.info("capture stop")
         }
     }
 
-    /// Pre-allocates the reusable engine so the first hold does not pay allocation. The
-    /// per-start `prepare()` still runs in `start()` after the tap is installed. Idempotent;
-    /// safe to call at launch.
-    func prepareEngine() {
-        storage.withLock { storage in
-            guard storage.engine == nil else { return }
-            storage.engine = AVAudioEngine()
-            Log.audio.info("audio engine pre-allocated")
+    /// Starts a new engine for `configuration`: tap, configuration observer, start. Touches no
+    /// shared state; on failure nothing is left behind.
+    private func makeEngine(for configuration: Configuration) throws -> LiveEngine {
+        let engine = AVAudioEngine()
+        let clock = BufferClock()
+        let native = try Self.installTap(on: engine, configuration: configuration, clock: clock)
+        // The engine stops itself when its I/O configuration changes (a device connects or
+        // disconnects, a Bluetooth headset switches profile). Without this the tap went
+        // silent while the utterance kept "listening".
+        let id = UUID()
+        let observer = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+        ) { [weak self, notificationQueue] _ in
+            notificationQueue.addOperation {
+                self?.handleConfigurationChange(of: id, reason: "configuration changed")
+            }
         }
+        engine.prepare()
+        do {
+            try engine.start()
+        } catch {
+            NotificationCenter.default.removeObserver(observer)
+            engine.inputNode.removeTap(onBus: 0)
+            throw error
+        }
+        return LiveEngine(
+            engine: engine, observer: observer, clock: clock, native: native, id: id,
+            startedAt: DispatchTime.now().uptimeNanoseconds
+        )
+    }
+
+    private static func tearDown(_ live: LiveEngine) {
+        NotificationCenter.default.removeObserver(live.observer)
+        live.engine.inputNode.removeTap(onBus: 0)
+        live.engine.stop()
+    }
+
+    /// CoreAudio errors seen from a device in transition during the hardware stress run:
+    /// -10868 from `engine.start()` right after a default-input switch, and 560227702
+    /// ("cannot perform IO") right after the active device vanished.
+    private static let transientCoreAudioCodes: Set<Int> = [-10868, 560_227_702]
+
+    /// Errors a device mid-switch produces: worth a retry on a fresh engine. Anything else
+    /// (no microphone, no converter, an unfamiliar CoreAudio failure) surfaces at once with
+    /// its real cause rather than being retried and reported as "still switching".
+    private static func isTransient(_ error: Error) -> Bool {
+        if let captureError = error as? AudioCaptureError {
+            if case .inputNotReady = captureError {
+                return true
+            }
+            return false
+        }
+        return transientCoreAudioCodes.contains((error as NSError).code)
+    }
+
+    /// Moves capture to a fresh engine on the current input, so a device change mid-hold
+    /// costs a moment of audio rather than the rest of the utterance. The old engine is not
+    /// reused: after Bluetooth turned off it still reported the headset's format, and
+    /// installing a tap in that format raised an exception Swift cannot catch. A device that
+    /// is still switching is retried; if it never settles the utterance is told, so it ends
+    /// (delivering what was said) instead of listening to silence.
+    ///
+    /// Each attempt builds its engine under the lock, but the delay between attempts is
+    /// spent outside it, so a release during a restart waits for at most one engine build.
+    private func handleConfigurationChange(of engineID: UUID, reason: String) {
+        let restart: (ticket: UUID, exhausted: Bool)? = storage.withLock { storage in
+            guard var running = storage.running, running.currentID == engineID else {
+                Log.audio.debug("audio \(reason, privacy: .public) for a replaced or stopped engine ignored")
+                return nil
+            }
+            if let old = running.live {
+                Self.tearDown(old)
+            }
+            running.restartsWithoutAudio += 1
+            let exhausted = running.restartsWithoutAudio > Self.maxRestartsWithoutAudio
+            if !exhausted {
+                Log.audio.info("audio \(reason, privacy: .public) during capture; moving to a fresh engine")
+            }
+            let ticket = UUID()
+            running.live = nil
+            running.currentID = ticket
+            storage.running = running
+            return (ticket, exhausted)
+        }
+        guard let restart else {
+            return
+        }
+        let ticket = restart.ticket
+        guard !restart.exhausted else {
+            giveUp(ticket: ticket, after: "\(Self.maxRestartsWithoutAudio) restarts without audio (\(reason))")
+            return
+        }
+        for attempt in 1...Self.engineAttempts {
+            if attempt > 1 {
+                Thread.sleep(forTimeInterval: Self.engineRetryDelay)
+            }
+            let result: Result<StartedEngine, Error>? = storage.withLock { storage in
+                guard var running = storage.running, running.currentID == ticket else {
+                    return nil
+                }
+                do {
+                    let live = try makeEngine(for: running.configuration)
+                    running.live = live
+                    running.currentID = live.id
+                    storage.running = running
+                    return .success(StartedEngine(live, outputFormat: running.configuration.outputFormat))
+                } catch {
+                    return .failure(error)
+                }
+            }
+            switch result {
+            case nil:
+                Log.audio.info("capture restart abandoned: capture stopped meanwhile")
+                return
+            case .success(let started):
+                Log.audio.info(
+                    "capture restarted on attempt \(attempt, privacy: .public): native \(started.nativeRate, privacy: .public) Hz x\(started.nativeChannels, privacy: .public)"
+                )
+                scheduleSilenceCheck(for: started.id)
+                return
+            case .failure(let error):
+                Log.audio.error(
+                    "capture restart attempt \(attempt, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+        giveUp(ticket: ticket, after: "\(Self.engineAttempts) restart attempts")
+    }
+
+    private func giveUp(ticket: UUID, after what: String) {
+        let notify: (@Sendable (String) -> Void)? = storage.withLock { storage in
+            guard let running = storage.running, running.currentID == ticket else {
+                return nil
+            }
+            storage.running = nil
+            return running.configuration.onInterruption
+        }
+        guard let notify else {
+            return
+        }
+        Log.audio.error("capture could not recover after \(what, privacy: .public); ending the utterance")
+        notify(Self.microphoneChangedMessage)
+    }
+
+    // MARK: Silence check
+
+    private func scheduleSilenceCheck(for engineID: UUID) {
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + Self.silenceCheckInterval) {
+            [weak self, notificationQueue] in
+            notificationQueue.addOperation {
+                self?.checkForSilence(of: engineID)
+            }
+        }
+    }
+
+    /// Restarts an engine that stopped delivering buffers without saying so. Runs on the
+    /// notification queue, so it never overlaps a configuration-change restart.
+    private func checkForSilence(of engineID: UUID) {
+        let verdict: SilenceVerdict = storage.withLock { storage in
+            guard var running = storage.running, running.currentID == engineID, let live = running.live else {
+                return .gone
+            }
+            // The buffer clock first: read after `now`, a buffer landing in between would be
+            // newer than `now` and the unsigned subtraction would trap.
+            let last = live.clock.lastBuffer
+            let now = DispatchTime.now().uptimeNanoseconds
+            let anchor = max(last, live.startedAt)
+            let silent = now >= anchor ? now - anchor : 0
+            let deadline = last == 0 ? Self.firstBufferDeadline : Self.bufferGapDeadline
+            guard silent > deadline else {
+                // Buffers are flowing again: an earlier blip minutes ago must not count
+                // towards giving up on a long hold.
+                if last != 0, running.silenceRestarts > 0 || running.restartsWithoutAudio > 0 {
+                    running.silenceRestarts = 0
+                    running.restartsWithoutAudio = 0
+                    storage.running = running
+                }
+                return .healthy
+            }
+            running.silenceRestarts += 1
+            storage.running = running
+            if running.silenceRestarts > Self.maxSilenceRestarts {
+                Self.tearDown(live)
+                storage.running = nil
+                return .giveUp(running.configuration.onInterruption)
+            }
+            return .restart(silentMillis: silent / 1_000_000)
+        }
+        switch verdict {
+        case .gone:
+            return
+        case .healthy:
+            scheduleSilenceCheck(for: engineID)
+        case .restart(let silentMillis):
+            handleConfigurationChange(of: engineID, reason: "delivered no audio for \(silentMillis) ms")
+        case .giveUp(let notify):
+            Log.audio.error("capture delivered no audio after \(Self.maxSilenceRestarts, privacy: .public) restarts; ending the utterance")
+            notify(Self.microphoneChangedMessage)
+        }
+    }
+
+    /// Installs the tap in the input node's current native format, converting to the
+    /// configured output format when they differ. Returns the native format.
+    private static func installTap(
+        on engine: AVAudioEngine,
+        configuration: Configuration,
+        clock: BufferClock
+    ) throws -> AVAudioFormat {
+        let outputFormat = configuration.outputFormat
+        let input = engine.inputNode
+        let native = input.outputFormat(forBus: 0)
+        guard native.sampleRate > 0, native.channelCount > 0 else {
+            Log.audio.error("capture start failed: input node reports no usable format")
+            throw AudioCaptureError.noInputDevice
+        }
+        // installTap raises an Objective-C exception, which Swift cannot catch and which
+        // aborts the app, when the tap format's rate differs from the hardware's. That is
+        // the state of a device mid-switch; report it as an error instead.
+        let hardware = input.inputFormat(forBus: 0)
+        guard hardware.sampleRate == native.sampleRate else {
+            Log.audio.error(
+                "capture start failed: input still switching (hardware \(hardware.sampleRate, privacy: .public) Hz, node \(native.sampleRate, privacy: .public) Hz)"
+            )
+            throw AudioCaptureError.inputNotReady
+        }
+        var converter: AVAudioConverter?
+        if native != outputFormat {
+            guard let made = AVAudioConverter(from: native, to: outputFormat) else {
+                Log.audio.error(
+                    "capture start failed: no converter from \(native.description, privacy: .public) to \(outputFormat.description, privacy: .public)"
+                )
+                throw AudioCaptureError.converterUnavailable(
+                    from: native.description, to: outputFormat.description
+                )
+            }
+            converter = made
+        }
+        if native.commonFormat != .pcmFormatFloat32 {
+            Log.audio.error(
+                "native input format is not Float32 (\(native.commonFormat.rawValue, privacy: .public)); the level meter will stay at zero"
+            )
+        }
+        let session = Session(
+            converter: converter, outputFormat: outputFormat, clock: clock,
+            onBuffer: configuration.onBuffer, onLevel: configuration.onLevel
+        )
+        input.installTap(onBus: 0, bufferSize: tapFrameCount, format: native) { buffer, _ in
+            session.process(buffer)
+        }
+        return native
     }
 
     // MARK: Buffer handling (audio thread)
@@ -253,5 +587,19 @@ private final class SingleHandoff: Sendable {
             taken = true
             return true
         }
+    }
+}
+
+/// When the tap last delivered a buffer, written by the audio thread and read by the silence
+/// check. Zero until the first buffer.
+private final class BufferClock: Sendable {
+    private let last = Atomic<UInt64>(0)
+
+    func mark() {
+        last.store(DispatchTime.now().uptimeNanoseconds, ordering: .relaxed)
+    }
+
+    var lastBuffer: UInt64 {
+        last.load(ordering: .relaxed)
     }
 }

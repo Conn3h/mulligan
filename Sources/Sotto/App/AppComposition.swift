@@ -29,6 +29,10 @@ final class AppComposition {
             // Read per press so an engine switch or a dictionary edit applies to the very
             // next hold.
             makeEngine: {
+                // A hand edit to dictionary.txt must reach the very next hold, and hotkey
+                // dictation never activates Sotto (the other reload trigger). The reload is a
+                // size-and-date check that returns at once when the file is unchanged.
+                DictionaryStore.shared.reloadFromDisk()
                 let choice = Settings.shared.speechEngine
                 activeEngine.name = choice.engineName
                 switch choice {

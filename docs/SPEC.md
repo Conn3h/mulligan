@@ -198,7 +198,9 @@ Behaviour:
   invisible and the mic would stay open. Right Option is raw flag `0x40`, Right Command is
   `0x10`, fn is `.maskSecondaryFn`. Pressed state is `flags.contains(key.flag)` on an event
   whose keycode equals `key.keyCode`.
-- Only transitions fire callbacks (track `isPressed`; ignore repeats).
+- Only transitions fire callbacks, tracked via `isPressed`: a same-state "up" is ignored, and
+  a same-state "down" is never a mere repeat (`.flagsChanged` only fires on a real change) —
+  it means a release was lost, handled below.
 - On `.tapDisabledByTimeout` or `.tapDisabledByUserInput`, re-enable the tap and pass the
   event through. While the tap was disabled it delivered no events, so a key-up in that
   window produced no `.flagsChanged` and `isPressed` would be stale-high, stranding the
@@ -207,6 +209,12 @@ Behaviour:
   device-specific modifier bits are not reliable in `CGEventSource` flag state) and, if the
   key is no longer down while `isPressed` is true, emit the missed release. Only the release
   direction is reconciled; a missed press is left alone.
+- A `.flagsChanged` reporting our key down while `isPressed` is already true is always a
+  real transition, never a repeat: it means a release was lost with neither
+  `.tapDisabledByTimeout` nor `.tapDisabledByUserInput` in between (the key came up during
+  sleep or screen lock, which disables the tap without either event). Emit the missed
+  release, then this press, rather than swallowing the second down and leaving the user
+  talking to nothing.
 - Return `nil` from the callback to swallow the event when `consumesEvent`, otherwise pass
   it through untouched. fn is never swallowed: swallowing it breaks fn-arrow, fn-delete and
   the emoji picker.
@@ -221,8 +229,11 @@ Behaviour:
 The tap needs Accessibility and real events, so `handle(type:keyCode:flags:)` is internal
 and the key-state probe is injectable, and `Tests/SottoAppTests/HotkeyMonitorTests.swift`
 drives `handle` with plain values and a fake probe to cover: a key-up lost while the tap was
-disabled is reconciled into a release on re-enable; and no spurious release fires when the
-key is still physically held across a tap flap.
+disabled is reconciled into a release on re-enable; no spurious release fires when the key is
+still physically held across a tap flap; a second down for our key with no tap-disabled
+event in between (the key came up during sleep or screen lock) emits the missed release
+before starting the new press; and a release while the key is already considered up is
+ignored.
 
 ### 6.5 Audio — `Core/AudioCapture.swift`
 
@@ -232,7 +243,8 @@ struct AudioChunk: @unchecked Sendable { let buffer: AVAudioPCMBuffer }   // liv
 protocol AudioCapturing: AnyObject, Sendable {
     func start(outputFormat: AVAudioFormat,
                onBuffer: @escaping @Sendable (AudioChunk) -> Void,
-               onLevel: @escaping @Sendable (Float) -> Void) throws
+               onLevel: @escaping @Sendable (Float) -> Void,
+               onInterruption: @escaping @Sendable (String) -> Void) throws
     func stop()
 }
 
@@ -245,13 +257,58 @@ frames × rate ratio, rounded up, plus headroom). When no conversion is needed t
 **deep-copied** (invariant 3); conversion already allocates fresh storage. `onLevel` gets an
 RMS level mapped from roughly −50…0 dBFS onto 0…1 so quiet speech still moves the meter.
 
+**A fresh `AVAudioEngine` is built on every `start()`**, not reused: a cached engine kept the
+input device and format it first saw, so after AirPods connected or the input changed
+between holds the tap could get a stale format, and one failed start poisoned every later
+press until relaunch. The new engine costs a few milliseconds, logged alongside the native
+and engine sample rates.
+
+A start that fails because the input is mid-switch (`inputNotReady`, or a CoreAudio error
+such as −10868 or 560227702 "cannot perform IO") is **retried on a fresh engine**, up to
+four attempts 150 ms apart; a leftover CoreAudio error is reported as `inputNotReady` ("The
+microphone is still switching. Try again.") rather than as an error code. Before installing
+the tap, the input node's rate is compared with the hardware's (`inputFormat(forBus:)`): a
+mismatch means the device is still switching, and installing the tap then raises an
+Objective-C exception Swift cannot catch (turning Bluetooth off mid-dictation crashed the app
+this way), so it throws `inputNotReady` instead.
+
+Each engine registers for `.AVAudioEngineConfigurationChange` with its own id. The observer
+runs on the posting thread (`queue: nil`) and only enqueues the handler on a private serial
+queue: an observer registered *with* a queue makes the poster wait for it, and the handler
+takes the capture lock. The engine stops itself on a device connect, disconnect, or a
+Bluetooth profile switch; the handler tears that engine down and moves capture to a **fresh
+engine** on the current input (the old one keeps reporting the previous device's format),
+with the same four-attempt retry, so a change mid-hold costs a moment of audio rather than
+the rest of the utterance. Each attempt builds its engine under the lock, but the delay
+between attempts is spent outside it, so a `stop()` waits for at most one engine build; a
+restart whose capture was stopped meanwhile is abandoned.
+
+A **silence check** runs every 0.35 s on the same queue: buffers flow even in silence, so an
+engine that has delivered none 0.7 s after starting, or none for 1 s since the last, is dead
+(an engine started on a device mid-switch can run without delivering anything and without a
+configuration change) and is moved to a fresh engine the same way; the check reads the
+buffer clock before the current time so a buffer landing in between cannot make the gap
+negative. After three such restarts, after twelve restarts of any kind without a buffer in
+between (a storm of configuration changes replaces each engine before its silence check can
+count), or when a restart exhausts its attempts, capture tears itself down and calls
+`onInterruption(microphoneChangedMessage)` ("The microphone changed and could not be
+restarted. Try again."); the controller ends the utterance as a release, delivering what was
+said, and then shows that message (§6.7). Both counts reset once buffers flow again. The
+controller calls `start()` on a detached task, so retry sleeps never block the main actor;
+an interruption that lands before setup finishes is held and applied afterwards. Engine and restart ids make a stale notification
+or silence check for a replaced engine a no-op.
+
 **No mutable state is shared with the audio thread.** `start()` builds one immutable
-`Session` value (converter, output format, both callbacks) and the tap closure captures
-that value; the class holds only the engine and an `isRunning` flag behind a `Synchronization.Mutex`
-(as built: the protocol requires `Sendable` and unchecked conformance is forbidden). `stop()` removes the tap and stops the engine; a callback already in
-flight completes against its own captured session and its output is discarded by the
-controller's generation check (§6.7). No `nonisolated(unsafe)` fields, no
-`@unchecked Sendable` on anything but `AudioChunk`.
+`Session` value (converter, output format, a buffer clock, `onBuffer`, `onLevel`) and the
+tap closure captures that value; the only thing the audio thread writes is the buffer
+clock's atomic timestamp, read by the silence check. The class itself holds the live engine
+and its observer, the output format, all three callbacks, and the current engine or restart
+id, bundled in one `Running` value
+behind a `Synchronization.Mutex` (as built: the protocol requires `Sendable` and unchecked
+conformance is forbidden). `stop()` removes the tap, stops the engine, and removes the
+observer; a callback already in flight completes against its own captured session and its
+output is discarded by the controller's generation check (§6.7). No `nonisolated(unsafe)`
+fields, no `@unchecked Sendable` on anything but `AudioChunk`.
 
 Logs the native → engine sample rates on start, and every conversion error. `start()` while
 running is a logged no-op; `stop()` is idempotent.
@@ -381,12 +438,18 @@ Behaviour:
 - Bias phrases are applied as FluidAudio vocabulary boosting: `ParakeetModels` also loads the
   separate CTC 110M encoder (`CtcModels.downloadAndLoad()`), and `start()` calls
   `configureVocabularyBoosting` with one `CustomVocabularyTerm` per phrase before streaming
-  begins, logging the count. The rescorer runs with `spotterRescueEnabled: false`: the
-  acoustic rescue replaces correctly heard words with unspoken dictionary terms (a
-  "Kubernetes" entry swallowed "the quick brown fox" in testing), and the library's own
-  benchmarks show turning it off cuts false positives roughly five-fold while raising recall. A CTC load failure is logged and leaves `Loaded.ctc` nil; the
-  engine then transcribes without bias and logs the skipped count. Corrections still run in
-  the pipeline either way.
+  begins, logging the count. The rescorer's engine-wide floor (`minBiasSimilarity`, 0.75
+  spelling similarity) is too loose for a short single-word term, which is often one edit
+  from an ordinary word ("code" to Codex is 0.80); each such term (six characters or fewer,
+  no space or hyphen) gets a per-term `minSimilarity` of 0.85 instead — above the 0.83 that
+  one edit costs a six-character word — from `BiasStrictness.minimumSimilarity(for:)`
+  (`SottoDictionary`), so it only replaces a spelling that is nearly exact. The rescorer runs
+  with `spotterRescueEnabled: false`: the acoustic rescue replaces correctly heard words with
+  unspoken dictionary terms (a "Kubernetes" entry swallowed "the quick brown fox" in
+  testing), and the library's own benchmarks show turning it off cuts false positives roughly
+  five-fold while raising recall. A CTC load failure is logged and leaves `Loaded.ctc` nil;
+  the engine then transcribes without bias and logs the skipped count. Corrections still run
+  in the pipeline either way.
 - Settings gets an "Engine" section: a `SegmentedChoice` over `SpeechEngineChoice` and a
   caption that reflects `ParakeetModels.state`.
 
@@ -399,6 +462,8 @@ struct Utterance: Sendable {
     let source: UtteranceSource
     let heldSeconds: TimeInterval   // measured with ContinuousClock, key down → key up
     let releasedAt: Date            // wall clock, for history display only
+    let targetProcessID: pid_t?     // frontmost app's pid at release; text is typed only if
+                                     // it is still frontmost when the text is ready; nil when unknown
 }
 
 @MainActor @Observable final class DictationController {
@@ -423,11 +488,12 @@ struct Utterance: Sendable {
          deliveryTimeout: Duration = .seconds(10))      // cap on onFinalTranscript so a hung pipeline cannot wedge .finishing
 
     /// Receives the final raw transcript once per utterance. Awaited before returning to idle.
-    var onFinalTranscript: (@MainActor (String, Utterance) async -> Void)?
+    /// A returned message (the text was recorded but not typed) is shown as the ending error.
+    var onFinalTranscript: (@MainActor (String, Utterance) async -> String?)?
 
     @discardableResult func activate() -> Bool    // installs the hotkey from Settings; false = no Accessibility
     func deactivate()                              // ends any utterance (no final callback), stops the hotkey
-    @discardableResult func reloadHotkey() -> Bool // ends any utterance as a release, then re-arms
+    @discardableResult func reloadHotkey() -> Bool // ends a hotkey utterance as a release, then re-arms
     func startButtonRecording()                    // press with source .button
     func stopButtonRecording()                     // release
     /// Number of tasks belonging to any utterance that have not completed. Exposed for tests.
@@ -457,9 +523,13 @@ state `.starting`, transcript cleared, `holdStartedAt` set. Start the **setup ta
 4. Create the audio stream with `bufferingPolicy: .unbounded` (invariant 2) and store the
    continuation. Start the **drain task** (detached, user-initiated): `for await chunk in
    stream { await engine.feed(chunk) }`.
-5. `try capture.start(outputFormat:onBuffer:onLevel:)` with `onBuffer` yielding into the
-   continuation and `onLevel` hopping to the main actor to apply
-   `level += (new - level) * 0.35` if the generation is still current.
+5. `try capture.start(outputFormat:onBuffer:onLevel:onInterruption:)` with `onBuffer`
+   yielding into the continuation; `onLevel` hopping to the main actor to apply
+   `level += (new - level) * 0.35` and track the hold's peak level (logged at release), both
+   only if the generation is still current; and `onInterruption` hopping to the main actor
+   to end the utterance **as a release** if the generation is still live (capture could not
+   survive a device change, §6.5), so everything said before the change is still delivered,
+   and to show the message afterwards.
 6. State `.listening`; play the start sound if `Settings.shared.soundEnabled`. Start the
    **consume task** on the main actor: `for try await snapshot in stream { transcript =
    snapshot.text }`; if the stream throws, log and terminate with `.failed(message)`. Also
@@ -488,29 +558,72 @@ it (below).
   captured nothing; `minimumHold` is the instant path for the obvious tap). `.tapped`
   otherwise behaves exactly like `.aborted`.
 - Otherwise create and store the **terminal task** (main actor) and, for `.released`, set
-  state `.finishing`, stop capture, zero the level, record the release instant. The task:
+  state `.finishing`, stop capture, zero the level, record the release instant and the
+  frontmost app's pid (`NSWorkspace.shared.frontmostApplication?.processIdentifier`) as the
+  utterance's `targetProcessID` — the text is typed later, after finishing and cleanup, only
+  if that app is still frontmost then (§6.8). The task:
   1. Cancel the setup task and await it (so a suspended setup cannot resume later).
   2. Stop capture (idempotent), finish the audio continuation, await the drain task.
-  3. `.released` → finish the engine, bounded by `engineFinishTimeout`: if `engine.finish()`
-     does not return in time it is abandoned and `engine.cancel()` is called instead, so a
-     stalled finalize (a quick tap that releases just after listening begins can hang the
-     analyzer's `finalizeAndFinishThroughEndOfInput`) can never wedge the utterance in
-     `.finishing`. `.tapped` / `.failed` / `.aborted` → `await engine.cancel()`.
+  3. `.released` → finish the engine, bounded by a **finish timeout that grows with the
+     hold**: `finishTimeout(base:heldSeconds:)` is `engineFinishTimeout` plus 0.25 s per
+     second held, capped at `finishTimeoutCap` (15 s) — Parakeet decodes nothing until 13 s of
+     audio is buffered, so a hold shorter than that is decoded entirely after release, and a
+     fixed cap would abandon it mid-decode. If `engine.finish()` does not return in time it is
+     abandoned and `engine.cancel()` is called instead, so a stalled finalize (a quick tap
+     that releases just after listening begins can hang the analyzer's
+     `finalizeAndFinishThroughEndOfInput`) can never wedge the utterance in `.finishing`.
+     `.tapped` / `.failed` / `.aborted` → `await engine.cancel()`.
   4. Await the consume task (it ends when the stream finishes).
-  5. `.released` with a non-blank transcript → deliver `onFinalTranscript?(raw, utterance)`,
-     bounded by `deliveryTimeout`: if delivery (formatting + injection) does not finish in
-     time the controller stops waiting and proceeds to idle, so a hung pipeline or AX injection
-     cannot wedge `.finishing` (the one state the Stop button cannot rescue). The in-flight
-     delivery is left running rather than cancelled, so a slow injection is never cut mid-paste.
-  6. Clear the session and `holdStartedAt`; state `.idle` for `.released`/`.tapped`/`.aborted`,
-     or `.error(message)` for `.failed`, which auto-returns to `.idle` after
+  5. `.released`: log the hold's peak meter level, then: a blank transcript fires no
+     callback; a transcript made only of hesitation sounds (**filler-only**, below) is
+     discarded; otherwise deliver `onFinalTranscript?(raw, utterance)`, bounded by `deliveryTimeout`: if
+     delivery (formatting + injection) does not finish in time the controller stops waiting
+     and proceeds to idle, so a hung pipeline or AX injection cannot wedge `.finishing` (the
+     one state the Stop button cannot rescue); the in-flight delivery is left running rather
+     than cancelled, so a slow injection is never cut mid-paste.
+  6. Clear the session and `holdStartedAt`. `.failed` always shows `.error(message)`.
+     `.tapped` and `.aborted` show `.idle`, except that an interruption inside `minimumHold`
+     (a tap) still shows `microphoneChangedMessage`. `.released` shows `.idle` too, unless one
+     of these applies, in which case it shows `.error(message)` instead (the first that
+     applies wins): the finish timed out and the transcript was blank
+     (`transcriptionTimedOutMessage`, "Transcription took too long; nothing was typed. Try
+     again."); the finish timed out but a transcript was still delivered
+     (`transcriptionIncompleteMessage`, "Transcription took too long; the end may be
+     missing."); delivery itself returned a message because the pipeline recorded the text
+     without typing it (§6.8); or capture was interrupted (`microphoneChangedMessage`). Any
+     of these auto-returns to `.idle` after
      `errorDisplayDuration` unless the state has changed since.
 
-**Release**: `terminate(reason: .released)` if a session exists and it has no terminal
-task yet; otherwise ignored. **`deactivate()`**: `terminate(.aborted)`, then
-`hotkey.stop()`. **`reloadHotkey()`**: if a session exists, `terminate(.released)` (the
-user's physical release will be invisible to the new monitor); then `hotkey.stop()`,
-reread the key from Settings, `hotkey.start()`.
+**Filler-only transcripts.** Parakeet transcribes a silent hold as a hesitation sound
+("Mm-.", "Hmm.") that used to get typed. `FillerOnly.matches` (`SottoText`) is true when a
+transcript has at least one word and every word — split on whitespace and hyphens, with
+surrounding punctuation trimmed — is `m`, `mm`, `mmm`… or one of `hmm hm mhm uh um erm uhm er ah eh`
+(stretched forms such as "hmmm" count). A word holding a digit or symbol ("42", "50%") is
+content, so "Um, 42." is kept. Such a transcript is discarded at step 5; any real
+word keeps it. Loudness cannot make this decision: on a laptop microphone in a normal room a
+quiet one-word answer peaks no higher on the meter than a silent hold's background noise
+(measured 0.21–0.35 against 0.21–0.27), so a level threshold either misses silent holds or
+swallows short words.
+
+**Press while ending**: a press that arrives while the session is terminating (the user
+presses again during "Transcribing…", or a recovered lost release is followed at once by
+its press, §6.4) is **queued**, not dropped: it starts as soon as the terminal task returns
+the controller to idle or error. A release matching the queued press (or the Stop button)
+before then drops it instead, and so do `deactivate()` and, for a queued hotkey press,
+`reloadHotkey()`: the new key's monitor never sees the old key's release, so a press queued
+under it would start recording with nothing held.
+
+**Release**: the hotkey's key-up calls `release(onlyFrom: .hotkey)`, which runs
+`terminate(reason: .released)` only if the live session was also started by the hotkey; a
+Record-button utterance is left running, so holding the push-to-talk key for something else
+(Command-Tab, a special character) while Recording from the main window cannot cut it short.
+`stopButtonRecording()` calls `release()` with no source restriction, ending whichever
+utterance is live. Either way, no session or a terminal task already running is ignored.
+**`deactivate()`**: `terminate(.aborted)`, then `hotkey.stop()`. **`reloadHotkey()`**: if a
+hotkey session exists, `terminate(.released)` (the user's physical release will be invisible
+to the new monitor); a Record-button session does not depend on the key and keeps running,
+so changing the key in Settings cannot cut it short. Then `hotkey.stop()`, reread the key
+from Settings, `hotkey.start()`.
 
 **Tests** (`Tests/SottoAppTests/DictationControllerTests.swift`, Swift Testing, with a
 fake hotkey, a fake capture that records calls and can emit buffers and levels on demand, a
@@ -526,7 +639,8 @@ as its own test:
   a fresh generation whose engine is a different instance and whose transcript is untouched
   by the old setup resuming.
 - duplicate release (two releases in a row) → one callback.
-- press while `.finishing` → ignored.
+- press while `.finishing` → queued: a new utterance starts once the old one reaches idle;
+  a press and release both inside `.finishing` → dropped, no new utterance.
 - engine `start()` throws → `.error`, then `.idle` after the display duration, no callback.
 - snapshot stream throws during listening → `.error`, capture stopped, no callback.
 - microphone denied → `.error` with the message, no engine created.
@@ -537,14 +651,37 @@ as its own test:
 - blank final transcript → no callback.
 - a release held for less than `minimumHold` → engine cancelled, state never `.finishing`,
   no callback, idle (the quick-tap instant-recovery path).
-- a `.released` whose `engine.finish()` never returns → bounded by `engineFinishTimeout`,
-  after which the engine is cancelled and the controller reaches `.idle` (no wedge).
+- a `.released` whose `engine.finish()` never returns → bounded by the finish timeout, after
+  which the engine is cancelled and the controller shows `transcriptionTimedOutMessage`
+  before reaching `.idle` (no silent wedge).
+- `finishTimeout(base:heldSeconds:)`, as a pure function: equals `base` at zero held seconds,
+  grows with `heldSeconds`, and never exceeds `finishTimeoutCap`.
 - a `.listening` utterance that is never released → the `maxHold` watchdog ends it as a
   release, delivering the transcript and reaching `.idle` (the lost-release backstop).
 - a `.released` whose `onFinalTranscript` never returns → bounded by `deliveryTimeout`,
   after which the controller reaches `.idle` without waiting (no `.finishing` wedge).
 - stale level callback (from the previous generation) does not change `level`.
 - `.button` source is passed through to the callback.
+- a filler-only transcript ("Mm-.") is discarded: no callback fires.
+- a quiet one-word transcript ("Yes.") with low meter levels throughout is delivered.
+- a hotkey release does not end a utterance the Record button started; `stopButtonRecording`
+  still ends it.
+- a capture interruption (a device change `AudioCapture` could not survive, §6.5) ends a
+  live utterance as a release: the transcript is delivered, then its message is shown.
+- a message returned by `onFinalTranscript` (the pipeline recorded the text but did not type
+  it) is shown as the ending error, then the controller returns to `.idle`.
+
+`Tests/SottoAppTests/DictationOrderTests.swift` adds the **event-order matrix**: every
+external event (hotkey press, release, tap and lost-release recovery, Record, Stop,
+`reloadHotkey()`, `deactivate()`, capture interruption live and stale, snapshot failure, the
+`maxHold` watchdog) in every state (starting at each setup suspension point, listening from
+either source, finishing, delivering, a queued press, the error display, idle), plus the
+two-event sequences where order matters (interruption then release and the reverse, two
+interruptions, an interruption reported during capture start, press/reload/release, a setup
+failure after the release, deactivate during delivery, the watchdog then the late release,
+a finish or delivery timeout then another utterance, a tap then an immediate press). Every
+cell checks: at most one callback per utterance and none after a cancel, idle with no live
+tasks, capture stopped, every engine ended, and no engine unless a press should start one.
 
 Write these tests first; the fake types live in `Tests/SottoAppTests/Fakes.swift`.
 
@@ -553,11 +690,11 @@ Write these tests first; the fake types live in `Tests/SottoAppTests/Fakes.swift
 ```swift
 @MainActor final class UtterancePipeline {
     init(engineName: String = "Apple")
-    func process(raw: String, utterance: Utterance) async
+    func process(raw: String, utterance: Utterance) async -> String?   // a message when the text was recorded but not typed
 }
 
 @MainActor enum TextInjector {
-    static func insert(_ text: String) async   // as built: async, so the ~540 ms paste sequence never blocks the main actor
+    static func insert(_ text: String) async -> Bool   // as built: async, so the ~540 ms paste sequence never blocks the main actor; false when neither path delivered the text
 }
 ```
 
@@ -570,25 +707,46 @@ switchable off by accident); record a `DictationRun` (§6.13) with `processSecon
 with `ContinuousClock` from the moment `process` was entered plus the caller-supplied
 release-to-entry gap (the controller passes `heldSeconds`; the pipeline measures its own
 duration; `processSeconds` = pipeline duration), which is the latency the user actually
-feels; **inject only when `utterance.source == .hotkey`**; play the end sound if enabled.
+feels; **inject only when `utterance.source == .hotkey`**, and only into the app that was
+frontmost at release. The text is not ready to type until after finishing and cleanup, so
+`Utterance.targetProcessID` carries the frontmost app's pid captured at release (§6.7); a
+hotkey utterance compares it against the frontmost app now, and types only on a match.
+Play the end sound, meaning "the text landed", only when it actually did.
 
 Why the source check: pressing Record in Sotto's own window activates Sotto and focuses
 the button, so the system-wide focused element is Sotto's, not the field the user was
 writing in. A button-started utterance is therefore recorded to history (where Copy is one
 click away) and never injected. The History panel labels such rows "recorded".
 
+`process` returns a message for the controller to show as the utterance's ending error
+(§6.7) whenever the text was recorded to history but not typed: `focusMovedMessage`
+("You switched apps before the text was ready; it is in History.") when the frontmost app
+changed since release (checked before injection, and again by `TextInjector` right before
+⌘V, since the accessibility verification and settle waits suspend), or `insertFailedMessage` ("The text could not be typed; it is in
+History.") when `TextInjector.insert` itself reports that neither strategy delivered the
+text. Either way the sound stays silent, but the run is still recorded and returns `nil`
+otherwise.
+
 Log the count of corrections applied and the character count injected or recorded.
 
-`TextInjector.insert` tries two strategies in order:
+`TextInjector.insert(_:targetProcessID:)` tries two strategies in order and returns an
+`Outcome`: `.landed`, `.failed`, or `.focusMoved` (another app came to the front before the
+paste, so nothing was typed):
 
 1. **Accessibility, verified.** Get the system-wide focused element; require
-   `kAXSelectedTextAttribute` to be settable; read `kAXSelectedTextRangeAttribute` before
-   the write; set the selected text to `text`; read the range again. **Only trust the write
-   if the selection range moved.** Many apps (Electron, Chrome, most terminals) report the
-   attribute settable, return success, and drop the text. The check is "moved", not "moved
-   by exactly `text.utf16.count`", because autocorrect and newline normalisation can shift
-   the caret by a different amount, and falling back after a write that did land would paste
-   the text twice, which is worse than a missing paragraph.
+   `kAXSelectedTextAttribute` to be settable; read `kAXSelectedTextRangeAttribute` and
+   `kAXNumberOfCharactersAttribute` before the write; set the selected text to `text`. The
+   write can report success and still drop the text (Electron, Chrome, most terminals do),
+   and some apps (Firefox) apply it at once but report the new selection only 10–20 ms
+   later, so **poll for up to 150 ms** rather than checking once. `ExpectedWrite` decides
+   what counts: the selection changed and its end now lies between half and twice the
+   inserted length past where the write started (plus a tolerance of 2 UTF-16 units or a
+   tenth of the insertion), or a field the write should grow grew by between half and twice
+   the inserted length less what it replaced (a field it should shrink must land within the
+   tolerance). The wide band is deliberate: editors that convert on insert (markdown, emoji
+   shortcodes, autocorrect) change the landed length, and treating their write as failed
+   pastes it a second time. Backwards moves, small changes and far jumps (a terminal
+   printing a screenful) are someone else's and do not count. No evidence inside the timeout falls back to the pasteboard.
 2. **Pasteboard + ⌘V.** Add one leading space to `text` only when the previous injection
    was Sotto's own, into the same frontmost application, within eight seconds, and did not
    end in whitespace; otherwise paste `text` unchanged (the paste path cannot read the
@@ -815,6 +973,14 @@ oracle; they are authored by the orchestrator, not the implementer):
   entry's `write` verbatim (its casing is never adapted to the input) and scanning resumes
   after the span. **Replacement text is never re-matched**, so `foo -> bar` plus
   `bar -> baz` turns `foo` into `bar`, not `baz`.
+- **Already-correct `write` text is not duplicated.** If the text at a winning match's start
+  already reads as that entry's `write` (case-insensitive, NFC-normalised) past the end of
+  the trigger's own match, and that occurrence is fenced the same way a trigger is, the match
+  replaces that whole existing span (so its casing is fixed, and it is reported like any
+  other fire, `from` being the existing span) and scanning resumes after it — so
+  `next -> Next.js` does not turn "Next.js" into "Next.js.js", and nothing re-matches
+  inside the replaced span. A same-length occurrence (e.g. `codex -> Codex` matching "codex")
+  is unaffected and still recases normally.
 - `applied` contains one `AppliedCorrection` per entry that fired, **ordered by the
   position of that entry's first match**, with `from` = the exact substring matched by that
   first match (original casing and spacing), `to` = `write`, `count` = how many times the
@@ -872,8 +1038,11 @@ save is logged at error level** (it means the UI shows an entry that will be gon
 relaunch). There is **no live file watcher** in v1: dispatch-source events arrive after
 the save that caused them, so a store cannot reliably tell its own atomic write from an
 external edit. Instead, `reloadFromDisk()` reads the file, and is called on
-`NSApplication.didBecomeActiveNotification` and from a "Reload Dictionary" menu item. A
-reload skips work when the file's modification date and size match the last load or save.
+`NSApplication.didBecomeActiveNotification`, from a "Reload Dictionary" menu item, and (as
+built) from `AppComposition`'s engine factory on every press: hotkey dictation never brings
+Sotto frontmost, so without this a hand edit to `dictionary.txt` would only reach a hold
+started some other way. A reload skips work when the file's modification date and size
+match the last load or save, so the per-press call costs a stat when nothing changed.
 When entries are re-parsed, **existing ids are preserved** for entries whose `(kind, hear,
 write)` triple matches an entry already in memory (first match wins); new lines get fresh
 ids. `revision` bumps only if the entry list actually changed.
@@ -1090,7 +1259,9 @@ Things that look wrong and are not, or look fine and will bite:
   finishes; await the drain task before reading the committed text (§6.6).
 - A setup task suspended at an `await` can resume after the utterance ended; generation
   checks after every suspension, and cancel-and-await from the terminal task (§6.7).
-- An AX write can return success and do nothing; verify by caret movement (§6.8).
+- An AX write can return success and do nothing, or a field can change on its own for an
+  unrelated reason; verify by a caret or length change matching the write's size, polled for
+  up to 150 ms rather than checked once (§6.8).
 - `AVAudioEngine` recycles tap buffers on return; copy them (§4.3).
 - `MainActor.assumeIsolated` asserts, it does not check. One permitted site (§6.4).
 - Never make the HUD key (§4.1).

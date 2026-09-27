@@ -147,7 +147,15 @@ final class HotkeyMonitor: HotkeySource {
                 return false
             }
             let pressed = flags.contains(key.flag)
-            if pressed != isPressed {
+            if pressed, isPressed {
+                // A flagsChanged for our key is always a real transition, so a second "down"
+                // means the release was lost without a tap-disabled event (the key came up
+                // during sleep or screen lock). Emit the missed release, then this press,
+                // rather than swallowing the press and leaving the user talking to nothing.
+                Log.hotkey.error("\(self.key.displayName, privacy: .public) down while already down; emitting the missed release")
+                onRelease?()
+                onPress?()
+            } else if pressed != isPressed {
                 isPressed = pressed
                 Log.hotkey.debug("\(self.key.displayName, privacy: .public) \(pressed ? "down" : "up", privacy: .public)")
                 if pressed {

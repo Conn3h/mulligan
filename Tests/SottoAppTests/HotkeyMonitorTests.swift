@@ -57,4 +57,33 @@ struct HotkeyMonitorTests {
         _ = monitor.handle(type: .tapDisabledByTimeout, keyCode: 0, flags: [])
         #expect(releases == 0)
     }
+
+    @Test func pressAfterAReleaseLostWithoutATapEventStillStartsDictation() {
+        let monitor = HotkeyMonitor()
+        monitor.key = .rightOption
+        monitor.isKeyDown = { _ in true }
+        var events: [String] = []
+        monitor.onPress = { events.append("press") }
+        monitor.onRelease = { events.append("release") }
+
+        let down = pressEvent(.rightOption)
+        _ = monitor.handle(type: down.0, keyCode: down.1, flags: down.2)
+        // The key comes up during sleep or screen lock: no flagsChanged and no tap-disabled
+        // event arrive, so the monitor still believes the key is down. The next real press
+        // is a flagsChanged for our key carrying our flag again; it must not be dropped.
+        _ = monitor.handle(type: down.0, keyCode: down.1, flags: down.2)
+        #expect(events == ["press", "release", "press"])
+    }
+
+    @Test func releaseWhileAlreadyUpIsIgnored() {
+        let monitor = HotkeyMonitor()
+        monitor.key = .rightOption
+        monitor.isKeyDown = { _ in false }
+        var releases = 0
+        monitor.onPress = {}
+        monitor.onRelease = { releases += 1 }
+
+        _ = monitor.handle(type: .flagsChanged, keyCode: PushToTalkKey.rightOption.keyCode, flags: [])
+        #expect(releases == 0)
+    }
 }

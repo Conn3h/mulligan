@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import Foundation
 import Observation
+import SottoText
 
 enum UtteranceSource: String, Sendable {
     case hotkey
@@ -14,6 +15,16 @@ struct Utterance: Sendable {
     let heldSeconds: TimeInterval
     /// Wall clock, for history display only.
     let releasedAt: Date
+    /// The frontmost app when the key was released: the text is typed only if it is still
+    /// frontmost when the text is ready. Nil when unknown.
+    let targetProcessID: pid_t?
+
+    init(source: UtteranceSource, heldSeconds: TimeInterval, releasedAt: Date, targetProcessID: pid_t? = nil) {
+        self.source = source
+        self.heldSeconds = heldSeconds
+        self.releasedAt = releasedAt
+        self.targetProcessID = targetProcessID
+    }
 }
 
 /// The one-utterance-at-a-time state machine between the hotkey, capture and the engine.
@@ -80,6 +91,13 @@ final class DictationController {
         let pressedAt: ContinuousClock.Instant
         var releasedAt: ContinuousClock.Instant?
         var releasedDate: Date?
+        var targetProcessID: pid_t?
+        /// Why capture stopped under this utterance, shown once its text is delivered.
+        var interruptionNotice: String?
+        /// An interruption that arrived while setup was still running (capture starts off the
+        /// main actor); applied once setup finishes, so it ends the utterance the same way
+        /// whichever side of that boundary it lands on.
+        var interruptionDuringSetup: String?
         var engine: (any TranscriptionEngine)?
         var audioContinuation: AsyncStream<AudioChunk>.Continuation?
         var setupTask: Task<Void, Never>?
@@ -87,6 +105,8 @@ final class DictationController {
         var consumeTask: Task<Void, Never>?
         var terminalTask: Task<Void, Never>?
         var watchdogTask: Task<Void, Never>?
+        /// Loudest raw meter level this hold, logged at release for diagnosis.
+        var peakLevel: Float = 0
 
         init(id: Int, source: UtteranceSource, pressedAt: ContinuousClock.Instant) {
             self.id = id
@@ -105,6 +125,14 @@ final class DictationController {
 
     static let microphoneDeniedMessage =
         "Microphone access is off. Enable it in System Settings > Privacy & Security > Microphone."
+    static let transcriptionTimedOutMessage = "Transcription took too long; nothing was typed. Try again."
+    static let transcriptionIncompleteMessage = "Transcription took too long; the end may be missing."
+    /// The most `finishTimeout` ever grows to, however long the hold.
+    static let finishTimeoutCap: Duration = .seconds(15)
+    /// Extra finish time per second held. Parakeet decodes nothing until 13 s of audio is
+    /// buffered, so a shorter hold is decoded entirely after release (about 0.1 s per
+    /// second held on an idle machine); this leaves room for a busy one.
+    private static let finishTimeoutPerHeldSecond = 0.25
     private static let levelSmoothing: Float = 0.35
     private static let startSoundName = "Tink"
 
@@ -119,7 +147,8 @@ final class DictationController {
     private(set) var liveTaskCount = 0
 
     /// Receives the final raw transcript once per utterance. Awaited before returning to idle.
-    @ObservationIgnored var onFinalTranscript: (@MainActor (String, Utterance) async -> Void)?
+    /// A returned message (the text was recorded but not typed) is shown as the ending error.
+    @ObservationIgnored var onFinalTranscript: (@MainActor (String, Utterance) async -> String?)?
 
     @ObservationIgnored private let hotkey: any HotkeySource
     @ObservationIgnored private let capture: any AudioCapturing
@@ -131,6 +160,7 @@ final class DictationController {
     /// almost no audio (a quick tap released just after listening began), which used to
     /// wedge the controller in `.finishing` forever, ignoring Stop and new presses. If
     /// finish does not return within this, the engine is cancelled and the utterance ends.
+    /// This is the base: the cap grows with the hold, see `finishTimeout(base:heldSeconds:)`.
     @ObservationIgnored private let engineFinishTimeout: Duration
     /// A release held for less than this is a mis-tap, not dictation: the engine is
     /// cancelled instead of finalized, the state never enters `.finishing`, and no final
@@ -157,6 +187,9 @@ final class DictationController {
     @ObservationIgnored private let clock = ContinuousClock()
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var session: Session?
+    /// A press that arrived while the previous utterance was still ending. It starts once
+    /// that utterance returns to idle, unless its own release arrives first.
+    @ObservationIgnored private var pendingPress: UtteranceSource?
     @ObservationIgnored private var errorResetTask: Task<Void, Never>?
 
     init(
@@ -192,7 +225,7 @@ final class DictationController {
             self?.press(source: .hotkey)
         }
         hotkey.onRelease = { [weak self] in
-            self?.release()
+            self?.release(onlyFrom: .hotkey)
         }
         let started = hotkey.start()
         if !started {
@@ -203,6 +236,7 @@ final class DictationController {
 
     /// Ends any utterance without a final callback, then stops the hotkey.
     func deactivate() {
+        dropPendingPress(reason: "controller deactivated")
         if let session {
             terminate(session, reason: .aborted)
         }
@@ -210,11 +244,18 @@ final class DictationController {
         Log.app.info("controller deactivated")
     }
 
-    /// Ends any utterance as a release (the physical release will be invisible to the new
-    /// monitor), then re-arms the hotkey with the key from Settings.
+    /// Ends a hotkey utterance as a release (the physical release will be invisible to the
+    /// new monitor), then re-arms the hotkey with the key from Settings.
     @discardableResult
     func reloadHotkey() -> Bool {
-        if let session {
+        // The new key's monitor never sees the old key's release, so a press queued under
+        // the old key would start recording with nothing held, and a hotkey utterance would
+        // never end. A Record-button utterance does not depend on the key: changing the key
+        // in Settings while recording from the window must not cut it short.
+        if pendingPress == .hotkey {
+            dropPendingPress(reason: "hotkey reloaded")
+        }
+        if let session, session.source == .hotkey {
             terminate(session, reason: .released)
         }
         hotkey.stop()
@@ -224,6 +265,14 @@ final class DictationController {
             "hotkey reloaded to \(self.hotkey.key.displayName, privacy: .public); running: \(started, privacy: .public)"
         )
         return started
+    }
+
+    private func dropPendingPress(reason: String) {
+        guard pendingPress != nil else {
+            return
+        }
+        pendingPress = nil
+        Log.app.info("queued press dropped: \(reason, privacy: .public)")
     }
 
     func startButtonRecording() {
@@ -238,9 +287,18 @@ final class DictationController {
 
     private func press(source: UtteranceSource) {
         if let session {
-            Log.app.debug(
-                "press ignored: utterance \(session.id, privacy: .public) still \(String(describing: self.state), privacy: .public)"
-            )
+            if session.isTerminating {
+                // Pressing again right after a release (or after a lost release was
+                // recovered) used to be dropped, so the user talked to nothing.
+                pendingPress = source
+                Log.app.info(
+                    "press queued: utterance \(session.id, privacy: .public) is still ending"
+                )
+            } else {
+                Log.app.debug(
+                    "press ignored: utterance \(session.id, privacy: .public) still \(String(describing: self.state), privacy: .public)"
+                )
+            }
             return
         }
         switch state {
@@ -265,9 +323,23 @@ final class DictationController {
         }
     }
 
-    private func release() {
+    /// `onlyFrom` limits which utterances this release may end: the hotkey's key-up must not
+    /// end a Record-button utterance (the user may be using the key for Command-Tab or a
+    /// special character). The Stop button passes nil and ends any utterance.
+    private func release(onlyFrom source: UtteranceSource? = nil) {
+        if let pending = pendingPress, source == nil || source == pending {
+            pendingPress = nil
+            Log.app.info("queued press released before it could start; dropped")
+            return
+        }
         guard let session else {
             Log.app.debug("release ignored: no utterance")
+            return
+        }
+        if let source, session.source != source {
+            Log.app.info(
+                "\(source.rawValue, privacy: .public) release ignored: utterance \(session.id, privacy: .public) was started by \(session.source.rawValue, privacy: .public)"
+            )
             return
         }
         guard !session.isTerminating else {
@@ -346,8 +418,12 @@ final class DictationController {
         // The continuation is the generation carrier for buffers: once the terminal task
         // finishes it, late yields from this session's tap are dropped by the stream.
         let generation = session.id
+        // Off the main actor: a start on an input that is mid-switch retries with short
+        // sleeps, which would otherwise freeze the HUD and the hotkey for that long.
+        let capture = self.capture
         do {
-            try capture.start(
+            try await Task.detached(priority: .userInitiated) {
+                try capture.start(
                 outputFormat: format,
                 onBuffer: { chunk in
                     continuation.yield(chunk)
@@ -356,13 +432,26 @@ final class DictationController {
                     Task { @MainActor in
                         self?.applyLevel(value, generation: generation)
                     }
+                },
+                onInterruption: { [weak self] message in
+                    Task { @MainActor in
+                        self?.captureInterrupted(message, generation: generation)
+                    }
                 }
-            )
+                )
+            }.value
         } catch {
             Log.audio.error(
                 "capture start failed for utterance \(session.id, privacy: .public): \(error.localizedDescription, privacy: .public)"
             )
-            terminate(session, reason: .failed(error.localizedDescription))
+            if isLive(session) {
+                terminate(session, reason: .failed(error.localizedDescription))
+            }
+            return
+        }
+        // Released during the start: the terminal task awaits this setup and then stops
+        // capture, so there is nothing more to do here.
+        guard isLive(session) else {
             return
         }
 
@@ -375,6 +464,9 @@ final class DictationController {
             await self?.consume(snapshots, for: session)
         }
         startWatchdog(session)
+        if let message = session.interruptionDuringSetup {
+            captureInterrupted(message, generation: session.id)
+        }
     }
 
     /// Caps `.listening` at `maxHold`. If a release is never delivered nothing else would end
@@ -422,10 +514,30 @@ final class DictationController {
         }
     }
 
+    /// Capture stopped under a live utterance (the input device changed and could not be
+    /// restarted). End it rather than keep "listening" to nothing: as a release, so the text
+    /// so far is delivered, then show the message.
+    private func captureInterrupted(_ message: String, generation: Int) {
+        guard let session, session.id == generation, !session.isTerminating else {
+            Log.audio.debug("capture interruption for a finished utterance ignored")
+            return
+        }
+        guard session.consumeTask != nil else {
+            session.interruptionDuringSetup = message
+            Log.audio.info("utterance \(session.id, privacy: .public) capture interrupted during setup; applying once setup finishes")
+            return
+        }
+        Log.audio.error("utterance \(session.id, privacy: .public) capture interrupted: \(message, privacy: .public)")
+        // End as a release so everything said before the interruption is still delivered.
+        session.interruptionNotice = message
+        terminate(session, reason: .released)
+    }
+
     private func applyLevel(_ value: Float, generation: Int) {
         guard let session, session.id == generation, !session.isTerminating else {
             return
         }
+        session.peakLevel = max(session.peakLevel, value)
         level += (value - level) * Self.levelSmoothing
     }
 
@@ -451,6 +563,7 @@ final class DictationController {
         let releasedInstant = clock.now
         session.releasedAt = releasedInstant
         session.releasedDate = Date()
+        session.targetProcessID = NSWorkspace.shared.frontmostApplication?.processIdentifier
 
         // A release held for less than `minimumHold` is a mis-tap, not dictation: cancel the
         // engine instead of finalizing it, so the utterance never enters `.finishing` and
@@ -493,9 +606,13 @@ final class DictationController {
         // 3. Finish or cancel the engine; this is the only place either happens. On a
         // release, finish is bounded so a stalled finalize (a quick tap) cannot wedge the
         // utterance in `.finishing` forever.
+        var finishTimedOut = false
         if let engine = session.engine {
             if reason.isRelease {
-                await finishBounded(engine, utterance: session.id)
+                let timeout = Self.finishTimeout(
+                    base: engineFinishTimeout, heldSeconds: session.heldSeconds(now: clock.now)
+                )
+                finishTimedOut = await finishBounded(engine, timeout: timeout, utterance: session.id)
             } else {
                 await engine.cancel()
             }
@@ -504,22 +621,48 @@ final class DictationController {
         // 4. The consume task ends when the snapshot stream finishes.
         await session.consumeTask?.value
 
-        // 5. Hand over the final text.
+        // 5. Hand over the final text, unless it is only a hesitation sound: Parakeet turns
+        // a silent hold into "Mm-.". Loudness cannot decide this; on a laptop mic in a normal
+        // room, quiet one-word answers peak no higher than a silent hold's background noise.
+        var endingError: String?
         if reason.isRelease {
             let raw = transcript
+            Log.app.info(
+                "utterance \(session.id, privacy: .public) audio: peak level \(session.peakLevel, format: .fixed(precision: 2), privacy: .public)"
+            )
             if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Log.app.info("utterance \(session.id, privacy: .public) blank transcript; no callback")
+                if finishTimedOut {
+                    endingError = Self.transcriptionTimedOutMessage
+                }
+            } else if FillerOnly.matches(raw) {
+                Log.app.info(
+                    "utterance \(session.id, privacy: .public) transcript is only a filler sound; discarding \(raw.count, privacy: .public) chars"
+                )
             } else {
+                if finishTimedOut {
+                    Log.app.error(
+                        "utterance \(session.id, privacy: .public) delivering a partial transcript after the finish timeout"
+                    )
+                    endingError = Self.transcriptionIncompleteMessage
+                }
                 let utterance = Utterance(
                     source: session.source,
                     heldSeconds: session.heldSeconds(now: clock.now),
-                    releasedAt: session.releasedDate ?? Date()
+                    releasedAt: session.releasedDate ?? Date(),
+                    targetProcessID: session.targetProcessID
                 )
                 Log.app.info(
                     "utterance \(session.id, privacy: .public) final transcript ready: \(raw.count, privacy: .public) chars, held \(utterance.heldSeconds, privacy: .public)s"
                 )
-                await deliverBounded(raw, utterance, id: session.id)
+                if let notice = await deliverBounded(raw, utterance, id: session.id), endingError == nil {
+                    endingError = notice
+                }
             }
+        }
+
+        if endingError == nil, let notice = session.interruptionNotice {
+            endingError = notice
         }
 
         // 6. Back to idle (or error).
@@ -531,7 +674,12 @@ final class DictationController {
         holdStartedAt = nil
         switch reason {
         case .released, .tapped, .aborted:
-            state = .idle
+            if let endingError {
+                state = .error(endingError)
+                scheduleErrorReset(endingError, generation: session.id)
+            } else {
+                state = .idle
+            }
         case .failed(let message):
             state = .error(message)
             scheduleErrorReset(message, generation: session.id)
@@ -541,6 +689,11 @@ final class DictationController {
         Log.app.info(
             "utterance \(session.id, privacy: .public) ended (\(reason.label, privacy: .public)); liveTaskCount after this task: \(self.liveTaskCount - 1, privacy: .public)"
         )
+        if let pending = pendingPress {
+            pendingPress = nil
+            Log.app.info("starting the queued press")
+            press(source: pending)
+        }
     }
 
     private func scheduleErrorReset(_ message: String, generation: Int) {
@@ -566,52 +719,80 @@ final class DictationController {
     /// does not finish within `deliveryTimeout`, stop waiting and let the terminal task return
     /// to idle. The in-flight delivery is left running rather than cancelled: a mid-paste
     /// cancel could corrupt the injection or leave the pasteboard unrestored.
-    private func deliverBounded(_ raw: String, _ utterance: Utterance, id: Int) async {
+    /// Returns the delivery's message for the user, if it finished in time and had one.
+    private func deliverBounded(_ raw: String, _ utterance: Utterance, id: Int) async -> String? {
         guard onFinalTranscript != nil else {
-            return
+            return nil
         }
         let latch = RaceLatch()
+        let notice = NoticeBox()
         Task { @MainActor in
-            await self.onFinalTranscript?(raw, utterance)
+            notice.value = await self.onFinalTranscript?(raw, utterance) ?? nil
             latch.resolve(true)
         }
         let timer = Task { @MainActor in
-            try? await Task.sleep(for: deliveryTimeout)
+            do {
+                try await Task.sleep(for: deliveryTimeout)
+            } catch {
+                Log.app.debug("delivery timer cancelled")
+                return
+            }
             latch.resolve(false)
         }
         if await latch.value() {
             timer.cancel()
-        } else {
-            Log.app.error(
-                "utterance \(id, privacy: .public) transcript delivery did not finish within \(self.deliveryTimeout, privacy: .public); leaving .finishing to avoid a wedge"
-            )
+            return notice.value
         }
+        Log.app.error(
+            "utterance \(id, privacy: .public) transcript delivery did not finish within \(self.deliveryTimeout, privacy: .public); leaving .finishing to avoid a wedge"
+        )
+        return nil
     }
 
     /// Awaits `engine.finish()` but never lets it hang the utterance. If finish does not
     /// return within `engineFinishTimeout`, cancel the engine (its abort path ends the
     /// analyzer and unblocks the stalled finalize) and stop waiting, so the terminal task
     /// proceeds and the controller leaves `.finishing`. The finish task then completes on
-    /// its own once cancel unblocks it.
-    private func finishBounded(_ engine: any TranscriptionEngine, utterance: Int) async {
+    /// its own once cancel unblocks it. Returns true when finish timed out and the engine
+    /// was cancelled.
+    private func finishBounded(_ engine: any TranscriptionEngine, timeout: Duration, utterance: Int) async -> Bool {
         let latch = RaceLatch()
         let finish = Task { @MainActor in
             await engine.finish()
             latch.resolve(true)
         }
         let timer = Task { @MainActor in
-            try? await Task.sleep(for: engineFinishTimeout)
+            do {
+                try await Task.sleep(for: timeout)
+            } catch {
+                Log.app.debug("engine finish timer cancelled")
+                return
+            }
             latch.resolve(false)
         }
         if await latch.value() {
             timer.cancel()
-        } else {
-            Log.app.error(
-                "utterance \(utterance, privacy: .public) engine finish timed out; cancelling to unblock"
-            )
-            await engine.cancel()
-            finish.cancel()
+            return false
         }
+        Log.app.error(
+            "utterance \(utterance, privacy: .public) engine finish timed out after \(timeout, privacy: .public); cancelling to unblock"
+        )
+        await engine.cancel()
+        finish.cancel()
+        return true
+    }
+
+    /// The finish cap for a hold of `heldSeconds`: `base`, plus time for audio the engine
+    /// may not have decoded yet, never more than `finishTimeoutCap`.
+    static func finishTimeout(base: Duration, heldSeconds: TimeInterval) -> Duration {
+        let grown = base + .milliseconds(Int(heldSeconds * finishTimeoutPerHeldSecond * 1_000))
+        return min(max(grown, base), max(base, finishTimeoutCap))
+    }
+
+    /// Carries the delivery's message out of its unstructured task.
+    @MainActor
+    private final class NoticeBox {
+        var value: String?
     }
 
     /// A one-shot latch: the first `resolve` wins and wakes the single waiter; later resolves

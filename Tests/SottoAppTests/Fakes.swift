@@ -133,6 +133,7 @@ final class FakeCapture: AudioCapturing {
         let format: AVAudioFormat
         let onBuffer: @Sendable (AudioChunk) -> Void
         let onLevel: @Sendable (Float) -> Void
+        let onInterruption: @Sendable (String) -> Void
     }
 
     private struct State: Sendable {
@@ -140,7 +141,8 @@ final class FakeCapture: AudioCapturing {
         var previous: Session?
         var startCalls = 0
         var stopCalls = 0
-        var startError: TestError?
+        var startError: (any Error)?
+        var startInterruption: String?
     }
 
     private let state = Mutex(State())
@@ -149,24 +151,39 @@ final class FakeCapture: AudioCapturing {
     var stopCalls: Int { state.withLock { $0.stopCalls } }
     var isRunning: Bool { state.withLock { $0.current != nil } }
 
-    func failNextStart(with error: TestError) {
+    func failNextStart(with error: any Error) {
         state.withLock { $0.startError = error }
+    }
+
+    /// Makes the next `start` report an interruption before it returns, as a device change
+    /// racing the start would. The controller must still see it after listening begins.
+    func interruptDuringNextStart(_ message: String) {
+        state.withLock { $0.startInterruption = message }
     }
 
     func start(
         outputFormat: AVAudioFormat,
         onBuffer: @escaping @Sendable (AudioChunk) -> Void,
-        onLevel: @escaping @Sendable (Float) -> Void
+        onLevel: @escaping @Sendable (Float) -> Void,
+        onInterruption: @escaping @Sendable (String) -> Void
     ) throws {
-        try state.withLock { state in
+        let interruption: String? = try state.withLock { state in
             state.startCalls += 1
             if let error = state.startError {
                 state.startError = nil
                 throw error
             }
-            let session = Session(format: outputFormat, onBuffer: onBuffer, onLevel: onLevel)
+            let session = Session(
+                format: outputFormat, onBuffer: onBuffer, onLevel: onLevel, onInterruption: onInterruption
+            )
             state.previous = state.current ?? state.previous
             state.current = session
+            let interruption = state.startInterruption
+            state.startInterruption = nil
+            return interruption
+        }
+        if let interruption {
+            onInterruption(interruption)
         }
     }
 
@@ -192,6 +209,28 @@ final class FakeCapture: AudioCapturing {
         }
         buffer.frameLength = frameLength
         session.onBuffer(AudioChunk(buffer: buffer))
+        return true
+    }
+
+    /// Reports that capture could not survive a device change, as the real capture does
+    /// after a failed restart. Returns false when nothing is capturing.
+    @discardableResult
+    func emitInterruption(_ message: String) -> Bool {
+        guard let session = state.withLock({ $0.current }) else {
+            return false
+        }
+        session.onInterruption(message)
+        return true
+    }
+
+    /// Fires the interruption callback of the most recently stopped session, as a late
+    /// device-change handler would. Returns false when no session has stopped yet.
+    @discardableResult
+    func emitStaleInterruption(_ message: String) -> Bool {
+        guard let session = state.withLock({ $0.previous }) else {
+            return false
+        }
+        session.onInterruption(message)
         return true
     }
 
@@ -331,6 +370,11 @@ final class Harness {
     let microphoneGate: Gate
     let controller: DictationController
     private(set) var received: [(text: String, utterance: Utterance)] = []
+    /// What the fake delivery reports back, as the pipeline does when text could not be typed.
+    var deliveryNotice: String?
+    /// When set, every delivery records its text and then parks here, as a slow format or
+    /// injection would, so a test can act while the controller awaits the callback.
+    var deliveryGate: Gate?
 
     init(
         engines: [FakeEngine] = [],
@@ -365,6 +409,10 @@ final class Harness {
         )
         controller.onFinalTranscript = { [weak self] text, utterance in
             self?.received.append((text: text, utterance: utterance))
+            if let gate = self?.deliveryGate {
+                await gate.pass()
+            }
+            return self?.deliveryNotice
         }
     }
 
