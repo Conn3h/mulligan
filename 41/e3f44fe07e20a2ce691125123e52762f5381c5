@@ -1,0 +1,23 @@
+Sources/Sotto/Core/ErasePlan.swift
+  s_54db94c607acba::t_ac22296fa029a7 119-127,173,175-177
+Tests/SottoAppTests/ErasePlanTests.swift
+  s_54db94c607acba::t_8c1b82239866c4 153-169
+docs/SPEC.md
+  s_54db94c607acba::t_ac22296fa029a7 1350-1354,1358-1359
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "41e3f44fe07e20a2ce691125123e52762f5381c5",
+  "prompts": {},
+  "sessions": {
+    "s_54db94c607acba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9cec764-c6e0-4aee-98d4-309aa9357e9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
