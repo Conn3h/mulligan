@@ -1,0 +1,28 @@
+Sources/Sotto/Speech/ParakeetModels.swift
+  s_54db94c607acba::t_15e3b76e98c23f 25-26,119
+Tests/SottoTextTests/SpeechEvidenceTests.swift
+  s_54db94c607acba::t_c192a9dfc81b15 1-34
+Sources/Sotto/Speech/ParakeetSpeechEngine.swift
+  s_54db94c607acba::t_15e3b76e98c23f 76,137-143,147-157,198-200
+  s_54db94c607acba::t_079a5425b4035f 5,201-202
+Sources/SottoText/SpeechEvidence.swift
+  s_54db94c607acba::t_23144f9d265eac 1-18
+docs/SPEC.md
+  s_54db94c607acba::t_98674f6ef2ac30 625-633
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "63bd87468d0e0ffe05f7dbc653e7344c2d856b4d",
+  "prompts": {},
+  "sessions": {
+    "s_54db94c607acba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9cec764-c6e0-4aee-98d4-309aa9357e9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
