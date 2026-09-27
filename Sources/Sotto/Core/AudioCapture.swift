@@ -82,8 +82,10 @@ final class AudioCapture: AudioCapturing {
     static let microphoneChangedMessage = "The microphone changed and could not be restarted. Try again."
 
     private let storage = Mutex(Storage())
-    /// Configuration-change notifications are delivered here, asynchronously, so a change
-    /// posted while `start` or a restart holds the lock can never deadlock on it.
+    /// Configuration changes are handled here. The observer itself runs on the posting thread
+    /// (queue nil) and only enqueues: an observer registered with a queue makes the poster
+    /// wait for it, and the handler takes the lock that `start` holds while the engine may be
+    /// posting, which could deadlock.
     private let notificationQueue: OperationQueue = {
         let queue = OperationQueue()
         queue.maxConcurrentOperationCount = 1
@@ -121,9 +123,11 @@ final class AudioCapture: AudioCapturing {
             // because delivery waits for this lock.
             let token = UUID()
             let observer = NotificationCenter.default.addObserver(
-                forName: .AVAudioEngineConfigurationChange, object: engine, queue: notificationQueue
-            ) { [weak self] _ in
-                self?.handleConfigurationChange(of: token)
+                forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+            ) { [weak self, notificationQueue] _ in
+                notificationQueue.addOperation {
+                    self?.handleConfigurationChange(of: token)
+                }
             }
             engine.prepare()
             do {
