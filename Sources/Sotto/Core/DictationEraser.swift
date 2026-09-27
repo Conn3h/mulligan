@@ -58,6 +58,12 @@ final class DictationEraser: TypingObserver {
     private static let modifierPoll: Duration = .milliseconds(10)
     private static let modifierWaitCap: Duration = .seconds(1)
     private static let verifyTimeout: Duration = .milliseconds(150)
+    /// How long a refused selection may take to land anyway: the ChatGPT app reports failure,
+    /// then applies it (2026-09-27).
+    private static let selectionSettle: Duration = .milliseconds(200)
+    /// Checked backspaces wait longer for the field to show them: an app that reads back
+    /// lazily must not stop a correct erase half-way.
+    private static let checkedVerifyTimeout: Duration = .milliseconds(500)
     private static let verifyPoll: Duration = .milliseconds(10)
 
     private let target: any EraseTarget
@@ -184,7 +190,7 @@ final class DictationEraser: TypingObserver {
             return .failed
         }
         let epoch = inputEpoch
-        guard target.select(range, in: element) else {
+        guard await selectAllowingLateLanding(range, in: element) else {
             Log.inject.info(
                 "erase: selection \(range.location, privacy: .public)+\(range.length, privacy: .public) did not take; using checked backspaces"
             )
@@ -235,6 +241,21 @@ final class DictationEraser: TypingObserver {
         return !eraseModifierIsDown()
     }
 
+    /// Some apps refuse the selection and then apply it a moment later. A selection that lands
+    /// late is the one path where a backspace would delete more than one character, so it is
+    /// waited for and then used as a selection.
+    private func selectAllowingLateLanding(_ range: CFRange, in element: AXElementID) async -> Bool {
+        if target.select(range, in: element) {
+            return true
+        }
+        await pause(Self.selectionSettle)
+        guard let now = target.selection(in: element), now.location == range.location, now.length == range.length else {
+            return false
+        }
+        Log.inject.info("erase: the selection landed after the app reported failure; using it")
+        return true
+    }
+
     /// A field that reads but will not take a selection (the ChatGPT app): backspaces in
     /// bursts, each burst proven first. Before every burst the focused element must be ours,
     /// the caret collapsed exactly where the remaining dictation ends, the text before it
@@ -245,6 +266,10 @@ final class DictationEraser: TypingObserver {
     ) async -> EraseOutcome {
         var remaining = record.text
         var posted = 0
+        // The first burst is a single backspace: if the app deletes more than one character
+        // for it (a selection that landed after all, or a word delete), the check after it
+        // stops the run with only the dictation's own last characters gone.
+        var burstSize = 1
         while !remaining.isEmpty {
             guard !token.isRevoked, inputEpoch == epoch, target.frontmostProcessID() == record.processID,
                   caretFollows(remaining, from: start, in: element), !eraseModifierIsDown()
@@ -254,7 +279,8 @@ final class DictationEraser: TypingObserver {
                 )
                 return posted == 0 ? .failed : .interrupted
             }
-            let burst = min(Self.chunkSize, remaining.count)
+            let burst = min(burstSize, remaining.count)
+            burstSize = Self.chunkSize
             let managed = target.postBackspaces(burst)
             posted += managed
             remaining = String(remaining.dropLast(managed))
@@ -283,7 +309,7 @@ final class DictationEraser: TypingObserver {
     }
 
     private func awaitCaret(following remaining: String, from start: Int, in element: AXElementID) async -> Bool {
-        let deadline = clock.now + Self.verifyTimeout
+        let deadline = clock.now + Self.checkedVerifyTimeout
         while !caretFollows(remaining, from: start, in: element) {
             guard clock.now < deadline else {
                 return false

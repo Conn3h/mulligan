@@ -11,6 +11,12 @@ final class FakeEraseTarget: EraseTarget {
     var frontmost: pid_t? = 42
     var read: ReadBack = .unreadable(window: nil)
     var selectSucceeds = true
+    /// The select call reports failure but the app applies it anyway, a moment later (the
+    /// ChatGPT app, 2026-09-27): the selection shows up on the next `selection(in:)` query.
+    var selectLandsLate = false
+    private var lateSelection: CFRange?
+    /// Each backspace deletes back to the previous space, as Option-Delete would.
+    var backspaceDeletesWord = false
     /// Whether an AX write of "" deletes the selection (Chrome and Electron often ignore it).
     var deleteApplies = true
     var currentSelection: CFRange?
@@ -60,6 +66,8 @@ final class FakeEraseTarget: EraseTarget {
         selects.append(range)
         if selectSucceeds {
             currentSelection = range
+        } else if selectLandsLate {
+            lateSelection = range
         }
         return selectSucceeds
     }
@@ -77,7 +85,13 @@ final class FakeEraseTarget: EraseTarget {
         return true
     }
 
-    func selection(in element: AXElementID) -> CFRange? { currentSelection }
+    func selection(in element: AXElementID) -> CFRange? {
+        if let lateSelection {
+            currentSelection = lateSelection
+            self.lateSelection = nil
+        }
+        return currentSelection
+    }
 
     func characterCount(in element: AXElementID) -> Int? {
         if let field {
@@ -107,9 +121,15 @@ final class FakeEraseTarget: EraseTarget {
         guard let text = field.map({ $0 as NSString }), let selection = currentSelection else {
             return
         }
-        let range = selection.length > 0
+        var range = selection.length > 0
             ? NSRange(location: selection.location, length: selection.length)
             : NSRange(location: selection.location - 1, length: selection.location > 0 ? 1 : 0)
+        if selection.length == 0, backspaceDeletesWord {
+            let before = text.substring(to: selection.location).trimmingCharacters(in: .init(charactersIn: " "))
+            let start = (before as NSString).range(of: " ", options: .backwards).location
+            let wordStart = start == NSNotFound ? 0 : start
+            range = NSRange(location: wordStart, length: selection.location - wordStart)
+        }
         field = text.replacingCharacters(in: range, with: "")
         currentSelection = CFRange(location: range.location, length: 0)
     }
@@ -291,7 +311,7 @@ struct DictationEraserTests {
         _ = typed(readable: true, eraser: eraser)
         #expect(await eraser.eraseLast(token: EraseToken()) == .interrupted)
         #expect(target.deletes == 0)
-        #expect(target.posted == [10])
+        #expect(target.posted == [1])
     }
 
     @Test func deleteRangeNeverFallsBackToCountedBackspaces() async {
@@ -573,7 +593,27 @@ struct DictationEraserTests {
         unselectableField(eraser, target)
         #expect(await eraser.eraseLast(token: EraseToken()) == .erased)
         #expect(target.field == older)
-        #expect(target.posted == [10, 10, 1])
+        // One probe backspace first, then bursts.
+        #expect(target.posted == [1, 10, 10])
+    }
+
+    @Test func aSelectionThatLandsAfterTheCallIsUsedAsASelection() async {
+        let (eraser, target, _, _) = makeEraser()
+        unselectableField(eraser, target)
+        target.selectLandsLate = true
+        #expect(await eraser.eraseLast(token: EraseToken()) == .erased)
+        #expect(target.field == older)
+        #expect(target.posted.isEmpty)
+        #expect(target.deletes == 1)
+    }
+
+    @Test func aBackspaceThatDeletesMoreThanOneCharacterStopsAtOnce() async {
+        let (eraser, target, _, _) = makeEraser()
+        unselectableField(eraser, target)
+        target.backspaceDeletesWord = true
+        #expect(await eraser.eraseLast(token: EraseToken()) == .interrupted)
+        #expect(target.posted == [1])
+        #expect(target.field?.hasPrefix(older + " Hello there,") == true)
     }
 
     @Test func checkedBackspacesStopWhenTheFieldChangesMidRun() async {
@@ -587,7 +627,7 @@ struct DictationEraserTests {
             }
         }
         #expect(await eraser.eraseLast(token: EraseToken()) == .interrupted)
-        #expect(target.posted == [10])
+        #expect(target.posted == [1])
         #expect(target.field?.hasPrefix(older) == true)
     }
 
@@ -596,7 +636,7 @@ struct DictationEraserTests {
         unselectableField(eraser, target)
         target.onPost = { _ in monitor.fire() }
         #expect(await eraser.eraseLast(token: EraseToken()) == .interrupted)
-        #expect(target.posted == [10])
+        #expect(target.posted == [1])
     }
 
     @Test func aSelectionThatLandsLateStopsBeforeAnyBackspace() async {
