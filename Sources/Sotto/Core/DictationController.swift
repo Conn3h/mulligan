@@ -232,6 +232,7 @@ final class DictationController {
 
     /// Ends any utterance without a final callback, then stops the hotkey.
     func deactivate() {
+        dropPendingPress(reason: "controller deactivated")
         if let session {
             terminate(session, reason: .aborted)
         }
@@ -243,6 +244,9 @@ final class DictationController {
     /// monitor), then re-arms the hotkey with the key from Settings.
     @discardableResult
     func reloadHotkey() -> Bool {
+        // The new key's monitor never sees the old key's release, so a press queued under
+        // the old key would start recording with nothing held.
+        dropPendingPress(reason: "hotkey reloaded")
         if let session {
             terminate(session, reason: .released)
         }
@@ -253,6 +257,14 @@ final class DictationController {
             "hotkey reloaded to \(self.hotkey.key.displayName, privacy: .public); running: \(started, privacy: .public)"
         )
         return started
+    }
+
+    private func dropPendingPress(reason: String) {
+        guard pendingPress != nil else {
+            return
+        }
+        pendingPress = nil
+        Log.app.info("queued press dropped: \(reason, privacy: .public)")
     }
 
     func startButtonRecording() {

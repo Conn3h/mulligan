@@ -198,6 +198,27 @@ struct DictationControllerTests {
         try await harness.releaseAndIdle()
     }
 
+    @Test func reloadingTheHotkeyDropsAQueuedPress() async throws {
+        // The new key's monitor never sees the old key's release, so a press queued under
+        // the old key would start recording with nothing held.
+        let finishGate = Gate(open: false)
+        let engine = FakeEngine(.init(finishGate: finishGate))
+        let harness = Harness(engines: [engine])
+        harness.controller.activate()
+        try await harness.pressAndListen()
+
+        harness.hotkey.release()
+        await finishGate.waitForArrival()
+        harness.hotkey.press()
+        harness.controller.reloadHotkey()
+
+        await finishGate.open()
+        try await settle("idle") { harness.state == .idle }
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(harness.state == .idle)
+        #expect(harness.factory.made.count == 1)
+    }
+
     @Test func pressAndReleaseWhileFinishingIsDropped() async throws {
         let finishGate = Gate(open: false)
         let engine = FakeEngine(.init(finishGate: finishGate))
