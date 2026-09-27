@@ -22,6 +22,9 @@ final class ParakeetModels {
     struct Loaded: Sendable {
         let asr: AsrModels
         let ctc: CtcModels?
+        /// Silero speech detector, scoring short holds (measurement, 2026-09-27). Nil when it
+        /// failed to load; dictation is unaffected.
+        let vad: VadManager?
     }
 
     static let shared = ParakeetModels()
@@ -54,7 +57,7 @@ final class ParakeetModels {
                     self?.report(progress)
                 }
             }
-            return Loaded(asr: asr, ctc: await Self.loadCtcModels())
+            return Loaded(asr: asr, ctc: await Self.loadCtcModels(), vad: await Self.loadVad())
         }
         loadTask = task
         Task { [weak self] in
@@ -109,6 +112,18 @@ final class ParakeetModels {
             return ctc
         } catch {
             Log.speech.error("parakeet: CTC model load failed, bias phrases disabled: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    /// The speech detector. A failure is logged and only disables the speech probe.
+    private static func loadVad() async -> VadManager? {
+        do {
+            let vad = try await VadManager()
+            Log.speech.info("parakeet: speech detector ready")
+            return vad
+        } catch {
+            Log.speech.error("parakeet: speech detector load failed: \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }

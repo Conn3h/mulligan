@@ -71,6 +71,14 @@ actor ParakeetSpeechEngine: TranscriptionEngine {
     private var latest = ""
     private let biasPhrases: [String]
 
+    /// Short holds are where Parakeet invents words on silence ("Mm-.", "Yeah."). Their audio
+    /// is kept, up to this many samples (3 s at 16 kHz), so the speech detector can score it
+    /// after the text is delivered. Measurement only (2026-09-27): it decides nothing yet.
+    private static let speechProbeLimit = 48_000
+    private var probeSamples: [Float] = []
+    private var probeOverflowed = false
+    private var vad: VadManager?
+
     init(biasPhrases: [String] = []) {
         self.biasPhrases = biasPhrases
     }
@@ -109,7 +117,45 @@ actor ParakeetSpeechEngine: TranscriptionEngine {
             Log.speech.debug("parakeet feed ignored in phase \(String(describing: self.phase), privacy: .public)")
             return
         }
+        keepForSpeechProbe(chunk.buffer)
         await manager.streamAudio(chunk.buffer)
+    }
+
+    private func keepForSpeechProbe(_ buffer: AVAudioPCMBuffer) {
+        guard !probeOverflowed, vad != nil, let channel = buffer.floatChannelData?[0] else {
+            return
+        }
+        let count = Int(buffer.frameLength)
+        guard probeSamples.count + count <= Self.speechProbeLimit else {
+            probeOverflowed = true
+            probeSamples = []
+            return
+        }
+        probeSamples.append(contentsOf: UnsafeBufferPointer(start: channel, count: count))
+    }
+
+    /// Scores the kept audio off the delivery path and logs numbers only: the detector's
+    /// per-window speech probabilities and the transcript's length, never the text.
+    private func probeSpeech(transcriptChars: Int, transcriptWords: Int) {
+        guard let vad, !probeOverflowed, !probeSamples.isEmpty else {
+            return
+        }
+        let samples = probeSamples
+        probeSamples = []
+        Task.detached(priority: .utility) {
+            do {
+                let results = try await vad.process(samples)
+                let probabilities = results.map(\.probability)
+                let peak = probabilities.max() ?? 0
+                let speechy = probabilities.filter { $0 >= 0.5 }.count
+                let listed = probabilities.map { String(format: "%.2f", $0) }.joined(separator: " ")
+                Log.speech.info(
+                    "speech probe: \(Double(samples.count) / 16_000, format: .fixed(precision: 2), privacy: .public) s, peak \(peak, format: .fixed(precision: 2), privacy: .public), windows >= 0.5: \(speechy, privacy: .public)/\(probabilities.count, privacy: .public) [\(listed, privacy: .public)], transcript \(transcriptChars, privacy: .public) chars \(transcriptWords, privacy: .public) words"
+                )
+            } catch {
+                Log.speech.error("speech probe failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     func finish() async {
@@ -154,6 +200,7 @@ actor ParakeetSpeechEngine: TranscriptionEngine {
         outputContinuation?.finish()
         phase = .finished
         Log.speech.info("parakeet finished: \(trimmed.count, privacy: .public) chars")
+        probeSpeech(transcriptChars: trimmed.count, transcriptWords: trimmed.split(whereSeparator: \.isWhitespace).count)
         await release()
     }
 
@@ -183,6 +230,9 @@ actor ParakeetSpeechEngine: TranscriptionEngine {
     private func performStart() async throws -> AsyncThrowingStream<TranscriptSnapshot, Error> {
         let loaded = try await ParakeetModels.shared.readyModels()
         let models = loaded.asr
+        vad = loaded.vad
+        probeSamples = []
+        probeOverflowed = false
         try checkLive()
 
         // The streaming preset is tuned for live feedback; the blank id must match the
