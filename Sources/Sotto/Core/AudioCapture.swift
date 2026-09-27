@@ -98,6 +98,10 @@ final class AudioCapture: AudioCapturing {
         /// Restarts forced by the silence check; bounded so a dead input ends the utterance
         /// instead of restarting forever.
         var silenceRestarts = 0
+        /// Every restart (configuration change or silence) since audio last flowed. A storm of
+        /// configuration changes replaces each engine before its silence check can count, so
+        /// this separate budget ends the churn.
+        var restartsWithoutAudio = 0
     }
 
     /// What the log needs from a newly started engine, readable outside the lock.
@@ -139,6 +143,7 @@ final class AudioCapture: AudioCapturing {
     private static let bufferGapDeadline: UInt64 = 1_000_000_000
     private static let silenceCheckInterval: TimeInterval = 0.35
     private static let maxSilenceRestarts = 3
+    private static let maxRestartsWithoutAudio = 12
 
     private let storage = Mutex(Storage())
     /// Configuration changes and silence checks are handled here. The observer itself runs
@@ -292,22 +297,31 @@ final class AudioCapture: AudioCapturing {
     /// Each attempt builds its engine under the lock, but the delay between attempts is
     /// spent outside it, so a release during a restart waits for at most one engine build.
     private func handleConfigurationChange(of engineID: UUID, reason: String) {
-        let ticket: UUID? = storage.withLock { storage in
+        let restart: (ticket: UUID, exhausted: Bool)? = storage.withLock { storage in
             guard var running = storage.running, running.currentID == engineID else {
                 Log.audio.debug("audio \(reason, privacy: .public) for a replaced or stopped engine ignored")
                 return nil
             }
-            Log.audio.info("audio \(reason, privacy: .public) during capture; moving to a fresh engine")
             if let old = running.live {
                 Self.tearDown(old)
+            }
+            running.restartsWithoutAudio += 1
+            let exhausted = running.restartsWithoutAudio > Self.maxRestartsWithoutAudio
+            if !exhausted {
+                Log.audio.info("audio \(reason, privacy: .public) during capture; moving to a fresh engine")
             }
             let ticket = UUID()
             running.live = nil
             running.currentID = ticket
             storage.running = running
-            return ticket
+            return (ticket, exhausted)
         }
-        guard let ticket else {
+        guard let restart else {
+            return
+        }
+        let ticket = restart.ticket
+        guard !restart.exhausted else {
+            giveUp(ticket: ticket, after: "\(Self.maxRestartsWithoutAudio) restarts without audio (\(reason))")
             return
         }
         for attempt in 1...Self.engineAttempts {
@@ -380,15 +394,19 @@ final class AudioCapture: AudioCapturing {
             guard var running = storage.running, running.currentID == engineID, let live = running.live else {
                 return .gone
             }
-            let now = DispatchTime.now().uptimeNanoseconds
+            // The buffer clock first: read after `now`, a buffer landing in between would be
+            // newer than `now` and the unsigned subtraction would trap.
             let last = live.clock.lastBuffer
-            let silent = now - max(last, live.startedAt)
+            let now = DispatchTime.now().uptimeNanoseconds
+            let anchor = max(last, live.startedAt)
+            let silent = now >= anchor ? now - anchor : 0
             let deadline = last == 0 ? Self.firstBufferDeadline : Self.bufferGapDeadline
             guard silent > deadline else {
                 // Buffers are flowing again: an earlier blip minutes ago must not count
                 // towards giving up on a long hold.
-                if last != 0, running.silenceRestarts > 0 {
+                if last != 0, running.silenceRestarts > 0 || running.restartsWithoutAudio > 0 {
                     running.silenceRestarts = 0
+                    running.restartsWithoutAudio = 0
                     storage.running = running
                 }
                 return .healthy
@@ -396,6 +414,7 @@ final class AudioCapture: AudioCapturing {
             running.silenceRestarts += 1
             storage.running = running
             if running.silenceRestarts > Self.maxSilenceRestarts {
+                Self.tearDown(live)
                 storage.running = nil
                 return .giveUp(running.configuration.onInterruption)
             }

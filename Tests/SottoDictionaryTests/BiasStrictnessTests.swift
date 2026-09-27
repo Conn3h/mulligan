@@ -13,7 +13,7 @@ struct BiasStrictnessTests {
         #expect(BiasStrictness.minimumSimilarity(for: term) == nil)
     }
 
-    @Test(arguments: ["Claude Code", "React Native", "App Store Connect"])
+    @Test(arguments: ["Claude Code", "React Native", "App Store Connect", "Wi-Fi", "e-mail"])
     func multiWordTermsKeepTheDefault(term: String) {
         #expect(BiasStrictness.minimumSimilarity(for: term) == nil)
     }

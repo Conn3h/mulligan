@@ -19,7 +19,7 @@ public enum BiasStrictness {
     public static func minimumSimilarity(for term: String) -> Float? {
         let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
-              !trimmed.contains(where: \.isWhitespace),
+              !trimmed.contains(where: { $0.isWhitespace || $0 == "-" }),
               trimmed.count <= shortTermMaxLength
         else {
             return nil

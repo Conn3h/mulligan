@@ -286,11 +286,16 @@ restart whose capture was stopped meanwhile is abandoned.
 A **silence check** runs every 0.35 s on the same queue: buffers flow even in silence, so an
 engine that has delivered none 0.7 s after starting, or none for 1 s since the last, is dead
 (an engine started on a device mid-switch can run without delivering anything and without a
-configuration change) and is moved to a fresh engine the same way. After three such
-restarts, or when a restart exhausts its attempts, capture tears itself down and calls
+configuration change) and is moved to a fresh engine the same way; the check reads the
+buffer clock before the current time so a buffer landing in between cannot make the gap
+negative. After three such restarts, after twelve restarts of any kind without a buffer in
+between (a storm of configuration changes replaces each engine before its silence check can
+count), or when a restart exhausts its attempts, capture tears itself down and calls
 `onInterruption(microphoneChangedMessage)` ("The microphone changed and could not be
 restarted. Try again."); the controller ends the utterance as a release, delivering what was
-said, and then shows that message (§6.7). Engine and restart ids make a stale notification
+said, and then shows that message (§6.7). Both counts reset once buffers flow again. The
+controller calls `start()` on a detached task, so retry sleeps never block the main actor;
+an interruption that lands before setup finishes is held and applied afterwards. Engine and restart ids make a stale notification
 or silence check for a replaced engine a no-op.
 
 **No mutable state is shared with the audio thread.** `start()` builds one immutable
