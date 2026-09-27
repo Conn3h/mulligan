@@ -468,7 +468,7 @@ struct Utterance: Sendable {
 
     @discardableResult func activate() -> Bool    // installs the hotkey from Settings; false = no Accessibility
     func deactivate()                              // ends any utterance (no final callback), stops the hotkey
-    @discardableResult func reloadHotkey() -> Bool // ends any utterance as a release, then re-arms
+    @discardableResult func reloadHotkey() -> Bool // ends a hotkey utterance as a release, then re-arms
     func startButtonRecording()                    // press with source .button
     func stopButtonRecording()                     // release
     /// Number of tasks belonging to any utterance that have not completed. Exposed for tests.
@@ -583,9 +583,9 @@ swallows short words.
 presses again during "Transcribing…", or a recovered lost release is followed at once by
 its press, §6.4) is **queued**, not dropped: it starts as soon as the terminal task returns
 the controller to idle or error. A release matching the queued press (or the Stop button)
-before then drops it instead, and so do `reloadHotkey()` and `deactivate()`: the new key's
-monitor never sees the old key's release, so a press queued under it would start recording
-with nothing held.
+before then drops it instead, and so do `deactivate()` and, for a queued hotkey press,
+`reloadHotkey()`: the new key's monitor never sees the old key's release, so a press queued
+under it would start recording with nothing held.
 
 **Release**: the hotkey's key-up calls `release(onlyFrom: .hotkey)`, which runs
 `terminate(reason: .released)` only if the live session was also started by the hotkey; a
@@ -594,8 +594,10 @@ Record-button utterance is left running, so holding the push-to-talk key for som
 `stopButtonRecording()` calls `release()` with no source restriction, ending whichever
 utterance is live. Either way, no session or a terminal task already running is ignored.
 **`deactivate()`**: `terminate(.aborted)`, then `hotkey.stop()`. **`reloadHotkey()`**: if a
-session exists, `terminate(.released)` (the user's physical release will be invisible to the
-new monitor); then `hotkey.stop()`, reread the key from Settings, `hotkey.start()`.
+hotkey session exists, `terminate(.released)` (the user's physical release will be invisible
+to the new monitor); a Record-button session does not depend on the key and keeps running,
+so changing the key in Settings cannot cut it short. Then `hotkey.stop()`, reread the key
+from Settings, `hotkey.start()`.
 
 **Tests** (`Tests/SottoAppTests/DictationControllerTests.swift`, Swift Testing, with a
 fake hotkey, a fake capture that records calls and can emit buffers and levels on demand, a

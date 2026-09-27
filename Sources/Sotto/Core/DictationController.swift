@@ -240,14 +240,18 @@ final class DictationController {
         Log.app.info("controller deactivated")
     }
 
-    /// Ends any utterance as a release (the physical release will be invisible to the new
-    /// monitor), then re-arms the hotkey with the key from Settings.
+    /// Ends a hotkey utterance as a release (the physical release will be invisible to the
+    /// new monitor), then re-arms the hotkey with the key from Settings.
     @discardableResult
     func reloadHotkey() -> Bool {
         // The new key's monitor never sees the old key's release, so a press queued under
-        // the old key would start recording with nothing held.
-        dropPendingPress(reason: "hotkey reloaded")
-        if let session {
+        // the old key would start recording with nothing held, and a hotkey utterance would
+        // never end. A Record-button utterance does not depend on the key: changing the key
+        // in Settings while recording from the window must not cut it short.
+        if pendingPress == .hotkey {
+            dropPendingPress(reason: "hotkey reloaded")
+        }
+        if let session, session.source == .hotkey {
             terminate(session, reason: .released)
         }
         hotkey.stop()
