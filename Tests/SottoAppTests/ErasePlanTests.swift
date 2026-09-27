@@ -150,6 +150,23 @@ struct ErasePlanTests {
         #expect(decide(record(text), caret(40, preceding: text)) == .deleteRange(location: 34, length: 6))
     }
 
+    // A field that was readable when Sotto typed into it is only ever erased on proof.
+
+    @Test func aRecordedFieldThatIsUnreadableNowIsRefused() {
+        #expect(decide(record(), .unreadable(window: window)) == .refuse(.inputSince))
+    }
+
+    @Test func aRecordedFieldWithoutACaretIsRefused() {
+        #expect(decide(record(caretEnd: nil), caret(40, preceding: spoken)) == .refuse(.textChanged))
+    }
+
+    @Test func unverifiedButReadableNowNeedsACollapsedSelection() {
+        let readBack = ReadBack.readable(
+            element: field, window: window, selection: CFRange(location: 40 - units, length: units), preceding: spoken
+        )
+        #expect(decide(record(element: false), readBack) == .refuse(.textChanged))
+    }
+
     @Test func everyRefusalHasAMessageAndErasedHasNone() {
         #expect(EraseOutcome.erased.message == nil)
         let refusals: [EraseOutcome] = [

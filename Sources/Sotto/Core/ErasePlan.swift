@@ -116,8 +116,15 @@ enum ErasePlan: Equatable {
         guard frontmostPID == record.processID else {
             return .refuse(.inputSince)
         }
-        if case let .readable(element, window, selection, preceding) = readBack,
-           let recordedElement = record.element, let caretEnd = record.caretEnd {
+        // A field that was readable when Sotto typed into it is erased on proof or not at all:
+        // unreadable now means focus moved, and without the caret there is nothing to prove.
+        if let recordedElement = record.element {
+            guard case let .readable(element, window, selection, preceding) = readBack else {
+                return .refuse(.inputSince)
+            }
+            guard let caretEnd = record.caretEnd else {
+                return .refuse(.textChanged)
+            }
             return decideReadable(
                 record: record, recordedElement: recordedElement, caretEnd: caretEnd,
                 element: element, window: window, selection: selection, preceding: preceding
@@ -163,9 +170,11 @@ enum ErasePlan: Equatable {
         switch readBack {
         case .unreadable(let current):
             window = current
-        case .readable(_, let current, _, let preceding):
+        case .readable(_, let current, let selection, let preceding):
             window = current
-            guard sameUnits(preceding, record.text) else {
+            // A selection (the paste left selected, say) would swallow the first backspace
+            // whole, and the rest would eat older text.
+            guard selection.length == 0, sameUnits(preceding, record.text) else {
                 return .refuse(.textChanged)
             }
         }

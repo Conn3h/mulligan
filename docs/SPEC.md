@@ -1347,13 +1347,16 @@ enum ErasePlan: Equatable {
    `.refuse(.textChanged)` (a different element or window counts as `.inputSince`). The
    epoch is not consulted: read-back is proof, the epoch is inference. The element check is
    what stops identical text in another field ("Yes.") from being erased.
-4. `.unreadable`, or a record captured without an element (the target was unreadable when
-   it was typed): the epoch must equal `record.inputEpoch`, else `.refuse(.inputSince)`; the
+   A record that has an element is only ever erased this way: if the target is unreadable
+   now (focus moved) → `.refuse(.inputSince)`; if the record has no `caretEnd` →
+   `.refuse(.textChanged)`.
+4. A record captured without an element (the target was unreadable when it was typed): the
+   epoch must equal `record.inputEpoch`, else `.refuse(.inputSince)`; the
    focused window, when AX can name it, must equal the recorded one, else `.inputSince`; the
    text must hold no newline and at most `unverifiedEraseLimit` Characters (500, see §10),
    else `.refuse(.tooLongToVerify)`;
-   when the target is readable now after all, `preceding` must still equal `record.text`,
-   else `.refuse(.textChanged)`; then `.backspaces(record.text.count)`.
+   when the target is readable now after all, the selection must be a caret and `preceding`
+   must still equal `record.text`, else `.refuse(.textChanged)`; then `.backspaces(record.text.count)`.
 
 **Executing.** All AX calls in this section and in `TextInjector` run under a process-wide
 `AXUIElementSetMessagingTimeout` of 1 s, set once at launch on the system-wide element (the
