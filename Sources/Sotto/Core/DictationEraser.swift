@@ -59,13 +59,12 @@ final class DictationEraser: TypingObserver {
     private static let chunkPause: Duration = .milliseconds(2)
     private static let modifierPoll: Duration = .milliseconds(10)
     private static let modifierWaitCap: Duration = .seconds(1)
-    private static let verifyTimeout: Duration = .milliseconds(150)
+    /// How long a deletion may take to show in the field. Returns as soon as it shows; the
+    /// ChatGPT app needs more than 150 ms (acceptance, 2026-09-27).
+    private static let verifyTimeout: Duration = .milliseconds(500)
     /// How long a refused selection may take to land anyway: the ChatGPT app reports failure,
     /// then applies it (2026-09-27).
     private static let selectionSettle: Duration = .milliseconds(200)
-    /// Checked backspaces wait longer for the field to show them: an app that reads back
-    /// lazily must not stop a correct erase half-way.
-    private static let checkedVerifyTimeout: Duration = .milliseconds(500)
     private static let verifyPoll: Duration = .milliseconds(10)
 
     private let target: any EraseTarget
@@ -231,8 +230,9 @@ final class DictationEraser: TypingObserver {
         if await verifyDeleted(range, countBefore: countBefore, in: element) {
             return .erased
         }
+        // A key went out: the text may well be gone, so never claim nothing changed.
         Log.inject.error("erase: the selection-delete backspace did not verify")
-        return .failed
+        return .interrupted
     }
 
     /// Right before a key that goes to whatever has focus: same app in front, no user input,
@@ -319,7 +319,7 @@ final class DictationEraser: TypingObserver {
     }
 
     private func awaitCaret(following remaining: String, from start: Int, in element: AXElementID) async -> Bool {
-        let deadline = clock.now + Self.checkedVerifyTimeout
+        let deadline = clock.now + Self.verifyTimeout
         while !caretFollows(remaining, from: start, in: element) {
             guard clock.now < deadline else {
                 return false

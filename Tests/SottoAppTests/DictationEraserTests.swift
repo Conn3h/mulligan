@@ -21,6 +21,10 @@ final class FakeEraseTarget: EraseTarget {
     var backspaceDeletesWord = false
     /// Whether an AX write of "" deletes the selection (Chrome and Electron often ignore it).
     var deleteApplies = true
+    /// How long the field takes to show a deletion or a backspace (the ChatGPT app is slow).
+    var showsChangesAfter: Duration?
+    /// Whether a posted backspace changes the field at all.
+    var backspaceApplies = true
     var currentSelection: CFRange?
     var count: Int? = 100
     /// The erase modifier reads as physically down until this instant.
@@ -79,10 +83,12 @@ final class FakeEraseTarget: EraseTarget {
     func deleteSelection(in element: AXElementID) -> Bool {
         deletes += 1
         if deleteApplies {
-            if field != nil, let selection = currentSelection, selection.length > 0 {
-                backspaceInField()
-            } else {
-                collapseSelection()
+            later {
+                if self.field != nil, let selection = self.currentSelection, selection.length > 0 {
+                    self.backspaceInField()
+                } else {
+                    self.collapseSelection()
+                }
             }
         }
         onDelete?()
@@ -108,15 +114,36 @@ final class FakeEraseTarget: EraseTarget {
         let managed = min(count, postLimit ?? count)
         posted.append(managed)
         postedAt.append(ContinuousClock().now)
-        if field != nil {
-            for _ in 0..<managed {
-                backspaceInField()
+        if backspaceApplies {
+            later {
+                if self.field != nil {
+                    for _ in 0..<managed {
+                        self.backspaceInField()
+                    }
+                } else if managed > 0 {
+                    self.collapseSelection()
+                }
             }
-        } else if managed > 0 {
-            collapseSelection()
         }
         onPost?(posted.count)
         return managed
+    }
+
+    /// Applies a change now, or after `showsChangesAfter`, as a slow app would.
+    private func later(_ change: @escaping @MainActor () -> Void) {
+        guard let delay = showsChangesAfter else {
+            change()
+            return
+        }
+        Task { @MainActor in
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                Issue.record("fake field delay cancelled")
+                return
+            }
+            change()
+        }
     }
 
     /// One backspace in the modelled field: deletes the selection, or the character before
@@ -719,5 +746,37 @@ struct DictationEraserTests {
         eraser.recordTyped(typed)
         #expect(await eraser.eraseLast(token: EraseToken()) == .interrupted)
         #expect(target.posted == [10])
+    }
+
+    // MARK: Slow fields (the ChatGPT app, acceptance round two)
+
+    @Test func aSlowFieldThatShowsTheDeleteLateStillCountsAsErased() async {
+        let (eraser, target, _, _) = makeEraser()
+        readsBack(target)
+        target.showsChangesAfter = .milliseconds(300)
+        _ = typed(readable: true, eraser: eraser)
+        #expect(await eraser.eraseLast(token: EraseToken()) == .erased)
+        #expect(target.posted.isEmpty)
+    }
+
+    @Test func aSlowFallbackBackspaceStillCountsAsErased() async {
+        let (eraser, target, _, _) = makeEraser()
+        target.deleteApplies = false
+        readsBack(target)
+        target.showsChangesAfter = .milliseconds(300)
+        _ = typed(readable: true, eraser: eraser)
+        #expect(await eraser.eraseLast(token: EraseToken()) == .erased)
+        #expect(target.posted == [1])
+    }
+
+    /// Once a key went out, an unconfirmed result must not claim nothing changed.
+    @Test func anUnconfirmedFallbackBackspaceSaysCheckTheText() async {
+        let (eraser, target, _, _) = makeEraser()
+        target.deleteApplies = false
+        target.backspaceApplies = false
+        readsBack(target)
+        _ = typed(readable: true, eraser: eraser)
+        #expect(await eraser.eraseLast(token: EraseToken()) == .interrupted)
+        #expect(target.posted == [1])
     }
 }

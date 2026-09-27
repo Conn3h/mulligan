@@ -1408,13 +1408,16 @@ the input monitor does not see), the erase stops.
   a deletion of the selection and more. Before any selection is deleted, the same
   `isStillOurSelection` check as the fallback backspace runs (text may have shifted during
   the wait). Once the selection took: then set `kAXSelectedTextAttribute` to
-  `""` and poll (up to 150 ms, as §6.8) for the caret at `location` with the length shrunk by
+  `""` and poll (up to 500 ms; the ChatGPT app shows a deletion slowly) for the caret at
+  `location` with the length shrunk by
   `n`. If the write did not verify, post one backspace (which deletes only the selection) and
   poll again, but only after checking, right before posting, that the same app is in front,
   the input epoch has not moved, and a fresh read shows the recorded element focused with its
   selection exactly the range and its text exactly the record: the backspace goes to
   whatever has focus, not to the element. Any read-back that does
-  not match exactly → stop and return `.failed` (logged with both ranges). There is no
+  not match exactly → stop and return `.failed` (logged with both ranges); once the backspace
+  has gone out, an unverified result is `.interrupted` ("check the text"), never "nothing was
+  changed". There is no
   counted-backspace fallback on a readable target.
 - `.backspaces(count)`: post key-down/key-up pairs of kVK_Delete (marked, empty flags) in
   chunks of 10, yielding 2 ms between chunks. Before each chunk, re-check the epoch and the
