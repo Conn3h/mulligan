@@ -1307,11 +1307,14 @@ mutates anything, and on a confirmed `.landed` calls `DictationEraser.recordType
 the delivered string, the caret after the insert (AX path: the verified end; paste path: read
 once after the paste completes, below), `landedAt`, the epoch, and a snapshot of
 `lastInjection` from before this insert. If the input epoch moved while the text was landing
-(a click during a paste's settle), the focus and caret read now may belong to other text, so
-the record is kept without element, window and caret; the unchanged-input rule then refuses
-it. Each record also carries the delivery generation current when its insert began
-(`supersede()` bumps it); only a record of the current generation clears `superseded`, so an
-older paste settling after a newer delivery began cannot make itself erasable again. One
+(a click during a paste's settle), or the input monitor is not running at all, the focus and
+caret read now may belong to other text, so the record is kept without element, window and
+caret; the unchanged-input rule then refuses it. Each record also carries its delivery's
+generation: `supersede()` bumps and returns it at the start of the delivery, and the pipeline
+hands it through to `TextInjector.insert`, so a delivery that resumes late (after
+`deliveryTimeout`) keeps its own. Only a record of the current generation clears
+`superseded`, so an older delivery landing after a newer one began cannot make itself
+erasable again. One
 level only: a new landing replaces the record, and any erase attempt that gets past the
 "nothing to erase" check clears it, whatever the outcome.
 
@@ -1374,7 +1377,9 @@ physically up (`CGEventSource.keyState` by keycode, bounded to 1 s; still down a
 `.failed`, nothing posted), so no posted key can be read together with a held Command, and
 then **plans again from a fresh read**: the user may have moved the caret during the wait.
 Push to talk is still down, so every posted key is built from a `.privateState` source with
-its flags set explicitly to empty.
+its flags set explicitly to empty, and right before every post (the fallback backspace and
+each burst) the erase modifier is checked again: pressed again meanwhile (a modifier change
+the input monitor does not see), the erase stops.
 
 - `.deleteRange`: first try AX alone: set `kAXSelectedTextRangeAttribute` to the range, read
   it back, and require it to equal the range exactly; then set `kAXSelectedTextAttribute` to

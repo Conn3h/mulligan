@@ -79,15 +79,18 @@ enum TextInjector {
     /// `targetProcessID` is the app the text is meant for: the paste is abandoned if another
     /// app comes to the front while the accessibility write is being verified.
     @discardableResult
-    static func insert(_ text: String, targetProcessID: pid_t? = nil) async -> Outcome {
+    /// `generation` is the delivery this text belongs to (§6.16); nil means the current one.
+    static func insert(_ text: String, targetProcessID: pid_t? = nil, generation: UInt64? = nil) async -> Outcome {
         await MutationLane.run {
-            await insertExclusive(text, targetProcessID: targetProcessID)
+            await insertExclusive(text, targetProcessID: targetProcessID, generation: generation)
         }
     }
 
     /// The insert itself, run on the lane. Returns the outcome and, for a paste, the settle
     /// the next mutation must wait for (the paste lands asynchronously in the target).
-    private static func insertExclusive(_ text: String, targetProcessID: pid_t?) async -> (Outcome, Task<Void, Never>?) {
+    private static func insertExclusive(
+        _ text: String, targetProcessID: pid_t?, generation: UInt64?
+    ) async -> (Outcome, Task<Void, Never>?) {
         guard !text.isEmpty else {
             Log.inject.info("nothing to insert")
             return (.landed, nil)
@@ -98,7 +101,7 @@ enum TextInjector {
             processID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
             focus: focusedTarget(),
             inputEpoch: observer?.inputEpoch ?? 0,
-            generation: observer?.deliveryGeneration ?? 0,
+            generation: generation ?? observer?.deliveryGeneration ?? 0,
             previousInjection: lastInjection
         )
         let reason: String
@@ -147,9 +150,11 @@ enum TextInjector {
         // Input while the insert was landing (a click during a paste's settle, say) means the
         // focus and caret read now may belong to other text. Recorded without them, so the
         // unchanged-input rule refuses it rather than trusting a caret that moved (§6.16).
-        let touched = observer.inputEpoch != target.inputEpoch
+        let touched = !TypedDictation.landingIsTrusted(
+            monitoring: observer.isMonitoring, epochBefore: target.inputEpoch, epochNow: observer.inputEpoch
+        )
         if touched {
-            Log.inject.info("input arrived while the text was landing; recorded as not erasable here")
+            Log.inject.info("input arrived (or went unmonitored) while the text was landing; recorded as not erasable here")
         }
         observer.recordTyped(TypedDictation(
             text: delivered,
@@ -615,7 +620,11 @@ protocol TypingObserver: AnyObject {
     var inputEpoch: UInt64 { get }
     /// Bumped by `supersede()`, once per delivery.
     var deliveryGeneration: UInt64 { get }
+    /// False when the input monitor is not running; no landing is then trusted.
+    var isMonitoring: Bool { get }
     func recordTyped(_ typed: TypedDictation)
     /// A new delivery has begun; the previous record is no longer the last dictation.
-    func supersede()
+    /// Returns the new delivery's generation.
+    @discardableResult
+    func supersede() -> UInt64
 }

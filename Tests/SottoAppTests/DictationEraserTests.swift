@@ -449,4 +449,39 @@ struct DictationEraserTests {
         #expect(await eraser.eraseLast(token: EraseToken()) == .notTyped)
         #expect(target.posted.isEmpty)
     }
+
+    // MARK: Review fixes, round two
+
+    @Test func theFallbackBackspaceWaitsForNoModifier() async {
+        let (eraser, target, _, _) = makeEraser()
+        target.deleteApplies = false
+        readsBack(target)
+        // The erase key goes down again while the AX delete is being verified.
+        target.onDelete = { target.eraseKeyDownUntil = ContinuousClock().now + .seconds(30) }
+        _ = typed(readable: true, eraser: eraser)
+        #expect(await eraser.eraseLast(token: EraseToken()) == .failed)
+        #expect(target.posted.isEmpty)
+    }
+
+    @Test func backspacesStopWhenTheModifierGoesDownMidRun() async {
+        let (eraser, target, _, _) = makeEraser()
+        target.onPost = { _ in target.eraseKeyDownUntil = ContinuousClock().now + .seconds(30) }
+        _ = typed(String(repeating: "a", count: 35), readable: false, eraser: eraser)
+        #expect(await eraser.eraseLast(token: EraseToken()) == .interrupted)
+        #expect(target.posted == [10])
+    }
+
+    @Test func aLandingIsTrustedOnlyWhenMonitoredAndUntouched() {
+        #expect(TypedDictation.landingIsTrusted(monitoring: true, epochBefore: 3, epochNow: 3))
+        #expect(!TypedDictation.landingIsTrusted(monitoring: true, epochBefore: 3, epochNow: 4))
+        #expect(!TypedDictation.landingIsTrusted(monitoring: false, epochBefore: 3, epochNow: 3))
+    }
+
+    @Test func supersedeReturnsTheNewDeliveryGeneration() {
+        let (eraser, _, _, _) = makeEraser()
+        let first = eraser.supersede()
+        let second = eraser.supersede()
+        #expect(second == first + 1)
+        #expect(eraser.deliveryGeneration == second)
+    }
 }

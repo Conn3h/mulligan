@@ -107,10 +107,14 @@ final class DictationEraser: TypingObserver {
         Log.inject.debug("erase record: \(typed.text.count, privacy: .public) chars, readable \(typed.element != nil, privacy: .public)")
     }
 
-    func supersede() {
+    @discardableResult
+    func supersede() -> UInt64 {
         deliveryGeneration &+= 1
         superseded = true
+        return deliveryGeneration
     }
+
+    var isMonitoring: Bool { monitoring }
 
     func eraseLast(token: EraseToken) async -> EraseOutcome {
         await MutationLane.run {
@@ -214,7 +218,7 @@ final class DictationEraser: TypingObserver {
     /// the focused element is ours, its selection is exactly our range, and the text in it is
     /// still exactly what Sotto typed.
     private func isStillOurSelection(_ range: CFRange, element: AXElementID, record: TypedDictation, epoch: UInt64) -> Bool {
-        guard inputEpoch == epoch, target.frontmostProcessID() == record.processID else {
+        guard !eraseModifierIsDown(), inputEpoch == epoch, target.frontmostProcessID() == record.processID else {
             return false
         }
         guard case let .readable(focused, _, selection, preceding) = target.readBack(utf16Length: range.length),
@@ -256,7 +260,9 @@ final class DictationEraser: TypingObserver {
         var remaining = count
         var posted = 0
         while remaining > 0 {
+            // The erase key pressed again is a modifier change the input monitor does not see.
             let changed = inputEpoch != epoch || target.frontmostProcessID() != record.processID
+                || eraseModifierIsDown()
             if token.isRevoked || changed {
                 Log.inject.info(
                     "erase: stopped after \(posted, privacy: .public) of \(count, privacy: .public) backspaces (revoked \(token.isRevoked, privacy: .public), input or app changed \(changed, privacy: .public))"
@@ -274,6 +280,13 @@ final class DictationEraser: TypingObserver {
             await pause(Self.chunkPause)
         }
         return .erased
+    }
+
+    private func eraseModifierIsDown() -> Bool {
+        guard let keyCode = eraseKey().keyCode else {
+            return false
+        }
+        return target.isKeyDown(keyCode)
     }
 
     /// No key may be posted while the erase modifier is still down, or an app reading live

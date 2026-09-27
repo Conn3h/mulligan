@@ -21,11 +21,13 @@ final class UtterancePipeline {
     typealias HistoryRecorder = @MainActor (DictationRun) -> Void
     /// Types the text into the focused app, abandoning it if the given app is no longer in
     /// front by the time it would paste.
-    typealias Injector = @MainActor (String, pid_t?) async -> TextInjector.Outcome
+    /// The third argument is the delivery generation from `markDeliveryStarted` (§6.16).
+    typealias Injector = @MainActor (String, pid_t?, UInt64) async -> TextInjector.Outcome
     typealias SoundPlayer = @MainActor () -> Void
     typealias EngineNameReader = @MainActor () -> String
     typealias FrontmostProcessReader = @MainActor () -> pid_t?
-    typealias DeliveryMarker = @MainActor () -> Void
+    /// Marks the start of a delivery and returns its generation (§6.16).
+    typealias DeliveryMarker = @MainActor () -> UInt64
 
     private static let endSoundName = "Pop"
     static let focusMovedMessage = "You switched apps before the text was ready; it is in History."
@@ -48,12 +50,14 @@ final class UtterancePipeline {
         readSettings: @escaping SettingsReader = UtterancePipeline.readSharedSettings,
         makeCorrector: @escaping CorrectorProvider = { DictionaryStore.shared.corrector },
         recordHistory: @escaping HistoryRecorder = { run in HistoryLog.record(run) },
-        inject: @escaping Injector = { text, target in await TextInjector.insert(text, targetProcessID: target) },
+        inject: @escaping Injector = { text, target, generation in
+            await TextInjector.insert(text, targetProcessID: target, generation: generation)
+        },
         playEndSound: @escaping SoundPlayer = UtterancePipeline.playSystemEndSound,
         readFrontmostProcessID: @escaping FrontmostProcessReader = {
             NSWorkspace.shared.frontmostApplication?.processIdentifier
         },
-        markDeliveryStarted: @escaping DeliveryMarker = { TextInjector.observer?.supersede() }
+        markDeliveryStarted: @escaping DeliveryMarker = { TextInjector.observer?.supersede() ?? 0 }
     ) {
         self.readEngineName = readEngineName
         self.readSettings = readSettings
@@ -71,9 +75,9 @@ final class UtterancePipeline {
         let entered = clock.now
         // From here until this delivery's text lands (if it does), the previous record is no
         // longer the last dictation; an erase meanwhile must refuse, not erase it (§6.16).
-        if utterance.source == .hotkey {
-            markDeliveryStarted()
-        }
+        // The generation is this delivery's identity, carried to the insert: one that resumes
+        // late (after `deliveryTimeout`) must not take a newer delivery's.
+        let generation = utterance.source == .hotkey ? markDeliveryStarted() : 0
         let settings = readSettings()
         let formatter = Self.formatter(cleanupEnabled: settings.cleanupEnabled, smartCleanup: settings.smartCleanup)
         let formatted = await formatter.text.format(raw)
@@ -104,7 +108,7 @@ final class UtterancePipeline {
                 )
                 notice = Self.focusMovedMessage
             } else {
-                switch await inject(text, utterance.targetProcessID) {
+                switch await inject(text, utterance.targetProcessID, generation) {
                 case .landed:
                     break
                 case .focusMoved:

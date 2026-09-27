@@ -8,6 +8,8 @@ import Testing
 @MainActor
 private final class PipelineRecorder {
     var injected: [String] = []
+    /// The delivery generation each injection was handed.
+    var generations: [UInt64] = []
     var recorded: [DictationRun] = []
     var soundPlays = 0
     /// Supersede marks and injections, in the order they happened.
@@ -43,14 +45,18 @@ private struct PipelineHarness {
             readSettings: { settings },
             makeCorrector: { DictionaryCorrector(entries: entries) },
             recordHistory: { run in recorder.recorded.append(run) },
-            inject: { text, _ in
+            inject: { text, _, generation in
                 recorder.injected.append(text)
+                recorder.generations.append(generation)
                 recorder.order.append("inject")
                 return injectOutcome
             },
             playEndSound: { recorder.soundPlays += 1 },
             readFrontmostProcessID: { frontmostProcessID },
-            markDeliveryStarted: { recorder.order.append("supersede") }
+            markDeliveryStarted: {
+                recorder.order.append("supersede")
+                return 7
+            }
         )
     }
 
@@ -209,6 +215,12 @@ struct UtterancePipelineTests {
         let harness = PipelineHarness(injectOutcome: .failed)
         await harness.pipeline.process(raw: "hello", utterance: makeUtterance(source: .hotkey))
         #expect(harness.order.first == "supersede")
+    }
+
+    @Test func theInsertCarriesTheGenerationFromDeliveryStart() async {
+        let harness = PipelineHarness()
+        await harness.pipeline.process(raw: "hello", utterance: makeUtterance(source: .hotkey))
+        #expect(harness.recorder.generations == [7])
     }
 
     @Test func aButtonDeliveryDoesNotSupersede() async {

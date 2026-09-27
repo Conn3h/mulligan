@@ -38,6 +38,13 @@ struct TypedDictation: Sendable, Equatable {
     /// The delivery this insert belongs to. Only the current delivery's landing makes the
     /// record current again; an older paste settling late must not (§6.16).
     var generation: UInt64 = 0
+
+    /// Whether the focus and caret read after an insert can be trusted as that insert's: only
+    /// when the input monitor is running and saw nothing while the text landed. Otherwise a
+    /// click beside an older identical phrase could become the record's caret (§6.16).
+    static func landingIsTrusted(monitoring: Bool, epochBefore: UInt64, epochNow: UInt64) -> Bool {
+        monitoring && epochBefore == epochNow
+    }
 }
 
 /// The target as it reads right now.
