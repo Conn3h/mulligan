@@ -1,0 +1,23 @@
+docs/reviews/2026-09-27-erase-spec-codex-review.md
+  s_54db94c607acba::t_579612e6c66680 1-32
+docs/reviews/2026-09-27-erase-spec-independent-review.md
+  s_54db94c607acba::t_d4a5923eaae3ac 1-45
+docs/SPEC.md
+  s_54db94c607acba::t_535179e5bbe66b 16-17,231-232,446-451,954-955,1016-1024,1067,1165-1166,1232,1234-1248,1252-1256,1262-1263,1265-1268,1271-1280,1282,1284-1322,1324-1330,1333-1334,1338-1440,1444-1465,1467-1482,1574-1580
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "8a99612140433d9a7cdb696b50a74f39febbe232",
+  "prompts": {},
+  "sessions": {
+    "s_54db94c607acba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9cec764-c6e0-4aee-98d4-309aa9357e9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
