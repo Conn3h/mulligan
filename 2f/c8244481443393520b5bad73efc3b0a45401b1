@@ -1,0 +1,19 @@
+Sources/Sotto/Core/HotkeyMonitor.swift
+  s_54db94c607acba::t_2c757744439519 85,93-102,216-222
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "2fc8244481443393520b5bad73efc3b0a45401b1",
+  "prompts": {},
+  "sessions": {
+    "s_54db94c607acba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9cec764-c6e0-4aee-98d4-309aa9357e9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
