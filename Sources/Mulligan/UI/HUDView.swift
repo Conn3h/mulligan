@@ -132,7 +132,7 @@ private struct HUDMeterView: View {
 
     var body: some View {
         TimelineView(.animation(paused: !state.isActive)) { context in
-            let target = state.isActive ? CGFloat(max(0, min(1, level))) : 0
+            let target = state.isActive ? MeterScale.display(level) : 0
             TeeShotMark(
                 level: clock.advance(to: context.date, toward: target),
                 isRecording: state == .listening

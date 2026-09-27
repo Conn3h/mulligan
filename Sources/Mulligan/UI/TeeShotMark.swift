@@ -79,3 +79,13 @@ struct TeeShotMark: View {
         return path
     }
 }
+
+/// Maps the controller's 0...1 meter level onto the arcs (spec §6.14). The level is scaled so
+/// `DS.TeeShot.meterFullScale` fills the meter, then square-rooted so ordinary speech, well
+/// below its peaks, still reaches the middle arcs.
+enum MeterScale {
+    static func display(_ level: Float) -> CGFloat {
+        let scaled = max(0, min(1, level / DS.TeeShot.meterFullScale))
+        return CGFloat(scaled.squareRoot())
+    }
+}

@@ -377,6 +377,9 @@ extension DS {
         /// Half the angle each arc spans, either side of horizontal.
         static let arcHalfAngleDegrees: Double = 40
         static let arcLineWidth: CGFloat = 2.2
+        /// The raw meter level that lights every arc. Speech peaks at about 0.3 to 0.45
+        /// (measured 2026-09-28), so a full scale of 1 left all but the first arc dark.
+        static let meterFullScale: Float = 0.45
     }
 }
 

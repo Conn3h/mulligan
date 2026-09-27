@@ -1160,7 +1160,9 @@ borders.
 free second shot). `DS.TeeShot` holds its geometry. The app icon (`Tools/makeicon.swift`,
 `make icon`) draws it with a coral ball; below 64 px it drops the ground line and the outer
 arc. In the HUD it is the lamp and the meter: the ball is coral only while listening, and
-five arcs light from the inside out with level, each in its place on the meter scale.
+five arcs light from the inside out with level, each in its place on the meter scale
+(`MeterScale`: the level over `DS.TeeShot.meterFullScale`, 0.45, since speech peaks at
+about 0.3 to 0.45, then square-rooted so ordinary speech reaches the middle arcs).
 Elsewhere in the chrome the ball is neutral, since coral means recording.
 
 `UI/DesignSystem.swift` defines every token under `enum DS`: `Color` (ground, panel,
