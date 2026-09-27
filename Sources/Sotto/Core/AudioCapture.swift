@@ -75,14 +75,10 @@ final class AudioCapture: AudioCapturing {
         let onInterruption: @Sendable (String) -> Void
     }
 
-    /// One started engine. Built without the lock (so a slow CoreAudio call never stalls a
-    /// `stop()` from the main actor) and only then committed under it.
-    ///
-    /// `@unchecked Sendable` because ownership moves, it is never shared: the builder hands
-    /// the engine to the lock (or tears it down itself if the commit is refused), and whoever
-    /// later removes it from the lock is the only one that stops it. No two threads ever
-    /// touch the same engine.
-    private struct LiveEngine: @unchecked Sendable {
+    /// One started engine. Built inside the lock (an engine may only enter the lock's region
+    /// as a fresh value, and SPEC allows no unchecked Sendable here), but retries wait outside
+    /// it, so a `stop()` waits for at most one engine build.
+    private struct LiveEngine {
         let engine: AVAudioEngine
         let observer: NSObjectProtocol
         let clock: BufferClock
@@ -102,6 +98,21 @@ final class AudioCapture: AudioCapturing {
         /// Restarts forced by the silence check; bounded so a dead input ends the utterance
         /// instead of restarting forever.
         var silenceRestarts = 0
+    }
+
+    /// What the log needs from a newly started engine, readable outside the lock.
+    private struct StartedEngine: Sendable {
+        let id: UUID
+        let nativeRate: Double
+        let nativeChannels: UInt32
+        let converting: Bool
+
+        init(_ live: LiveEngine, outputFormat: AVAudioFormat) {
+            id = live.id
+            nativeRate = live.native.sampleRate
+            nativeChannels = live.native.channelCount
+            converting = live.native != outputFormat
+        }
     }
 
     private enum SilenceVerdict {
@@ -161,16 +172,35 @@ final class AudioCapture: AudioCapturing {
             outputFormat: outputFormat, onBuffer: onBuffer, onLevel: onLevel, onInterruption: onInterruption
         )
         let clock = ContinuousClock()
-        let started = clock.now
+        let startedAt = clock.now
         var lastError: Error = AudioCaptureError.inputNotReady
         for attempt in 1...Self.engineAttempts {
             if attempt > 1 {
                 Thread.sleep(forTimeInterval: Self.engineRetryDelay)
             }
-            let live: LiveEngine
-            do {
-                live = try makeEngine(for: configuration)
-            } catch {
+            let result: Result<StartedEngine, Error>? = storage.withLock { storage in
+                guard storage.running == nil else {
+                    return nil
+                }
+                do {
+                    let live = try makeEngine(for: configuration)
+                    storage.running = Running(configuration: configuration, live: live, currentID: live.id)
+                    return .success(StartedEngine(live, outputFormat: outputFormat))
+                } catch {
+                    return .failure(error)
+                }
+            }
+            switch result {
+            case nil:
+                Log.audio.info("capture start ignored: already running")
+                return
+            case .success(let started):
+                scheduleSilenceCheck(for: started.id)
+                Log.audio.info(
+                    "capture start: native \(started.nativeRate, privacy: .public) Hz x\(started.nativeChannels, privacy: .public) -> engine \(outputFormat.sampleRate, privacy: .public) Hz x\(outputFormat.channelCount, privacy: .public), converting: \(started.converting, privacy: .public), attempt \(attempt, privacy: .public), took \(clock.now - startedAt, privacy: .public)"
+                )
+                return
+            case .failure(let error):
                 lastError = error
                 Log.audio.error(
                     "capture start attempt \(attempt, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
@@ -178,49 +208,27 @@ final class AudioCapture: AudioCapturing {
                 guard Self.isTransient(error) else {
                     throw error
                 }
-                continue
             }
-            // Read what the log needs first: `live` is handed to the lock below.
-            let id = live.id
-            let nativeRate = live.native.sampleRate
-            let nativeChannels = live.native.channelCount
-            let converting = live.native != outputFormat
-            let rejected: LiveEngine? = storage.withLock { storage in
-                guard storage.running == nil else {
-                    return live
-                }
-                storage.running = Running(configuration: configuration, live: live, currentID: id)
-                return nil
-            }
-            if let rejected {
-                Self.tearDown(rejected)
-                Log.audio.info("capture start ignored: already running")
-                return
-            }
-            scheduleSilenceCheck(for: id)
-            Log.audio.info(
-                "capture start: native \(nativeRate, privacy: .public) Hz x\(nativeChannels, privacy: .public) -> engine \(outputFormat.sampleRate, privacy: .public) Hz x\(outputFormat.channelCount, privacy: .public), converting: \(converting, privacy: .public), attempt \(attempt, privacy: .public), took \(clock.now - started, privacy: .public)"
-            )
-            return
         }
         // Whatever CoreAudio said, the user can only wait and try again.
         throw Self.isTransient(lastError) ? AudioCaptureError.inputNotReady : lastError
     }
 
     func stop() {
-        let live: LiveEngine? = storage.withLock { storage in
-            let live = storage.running?.live
+        storage.withLock { storage in
+            guard let running = storage.running else {
+                return
+            }
+            if let live = running.live {
+                Self.tearDown(live)
+            }
             storage.running = nil
-            return live
-        }
-        if let live {
-            Self.tearDown(live)
             Log.audio.info("capture stop")
         }
     }
 
     /// Starts a new engine for `configuration`: tap, configuration observer, start. Touches no
-    /// shared state, so it runs without the lock; on failure nothing is left behind.
+    /// shared state; on failure nothing is left behind.
     private func makeEngine(for configuration: Configuration) throws -> LiveEngine {
         let engine = AVAudioEngine()
         let clock = BufferClock()
@@ -276,65 +284,62 @@ final class AudioCapture: AudioCapturing {
     /// is still switching is retried; if it never settles the utterance is told, so it ends
     /// (delivering what was said) instead of listening to silence.
     ///
-    /// Engines are built outside the lock and committed under it only if this restart is
-    /// still current, so a release during a slow restart never waits on CoreAudio.
+    /// Each attempt builds its engine under the lock, but the delay between attempts is
+    /// spent outside it, so a release during a restart waits for at most one engine build.
     private func handleConfigurationChange(of engineID: UUID, reason: String) {
-        let pending: (ticket: UUID, configuration: Configuration, old: LiveEngine?)? = storage.withLock { storage in
+        let ticket: UUID? = storage.withLock { storage in
             guard var running = storage.running, running.currentID == engineID else {
                 Log.audio.debug("audio \(reason, privacy: .public) for a replaced or stopped engine ignored")
                 return nil
             }
             Log.audio.info("audio \(reason, privacy: .public) during capture; moving to a fresh engine")
-            let old = running.live
+            if let old = running.live {
+                Self.tearDown(old)
+            }
             let ticket = UUID()
             running.live = nil
             running.currentID = ticket
             storage.running = running
-            return (ticket, running.configuration, old)
+            return ticket
         }
-        guard let pending else {
+        guard let ticket else {
             return
-        }
-        if let old = pending.old {
-            Self.tearDown(old)
         }
         for attempt in 1...Self.engineAttempts {
             if attempt > 1 {
                 Thread.sleep(forTimeInterval: Self.engineRetryDelay)
             }
-            let live: LiveEngine
-            do {
-                live = try makeEngine(for: pending.configuration)
-            } catch {
+            let result: Result<StartedEngine, Error>? = storage.withLock { storage in
+                guard var running = storage.running, running.currentID == ticket else {
+                    return nil
+                }
+                do {
+                    let live = try makeEngine(for: running.configuration)
+                    running.live = live
+                    running.currentID = live.id
+                    storage.running = running
+                    return .success(StartedEngine(live, outputFormat: running.configuration.outputFormat))
+                } catch {
+                    return .failure(error)
+                }
+            }
+            switch result {
+            case nil:
+                Log.audio.info("capture restart abandoned: capture stopped meanwhile")
+                return
+            case .success(let started):
+                Log.audio.info(
+                    "capture restarted on attempt \(attempt, privacy: .public): native \(started.nativeRate, privacy: .public) Hz x\(started.nativeChannels, privacy: .public)"
+                )
+                scheduleSilenceCheck(for: started.id)
+                return
+            case .failure(let error):
                 Log.audio.error(
                     "capture restart attempt \(attempt, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
                 )
-                continue
             }
-            let id = live.id
-            let nativeRate = live.native.sampleRate
-            let nativeChannels = live.native.channelCount
-            let rejected: LiveEngine? = storage.withLock { storage in
-                guard var running = storage.running, running.currentID == pending.ticket else {
-                    return live
-                }
-                running.live = live
-                running.currentID = id
-                storage.running = running
-                return nil
-            }
-            if let rejected {
-                Self.tearDown(rejected)
-                Log.audio.info("capture restart abandoned: capture stopped meanwhile")
-            } else {
-                Log.audio.info(
-                    "capture restarted on attempt \(attempt, privacy: .public): native \(nativeRate, privacy: .public) Hz x\(nativeChannels, privacy: .public)"
-                )
-                scheduleSilenceCheck(for: id)
-            }
-            return
         }
-        giveUp(ticket: pending.ticket, after: "\(Self.engineAttempts) restart attempts")
+        giveUp(ticket: ticket, after: "\(Self.engineAttempts) restart attempts")
     }
 
     private func giveUp(ticket: UUID, after what: String) {
