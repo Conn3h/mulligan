@@ -1,0 +1,27 @@
+Sources/Sotto/Dictionary/DictionaryStore.swift
+  s_54db94c607acba::t_2b97a369e50cf7 260-264
+Sources/SottoDictionary/DictionaryCorrector.swift
+  s_54db94c607acba::t_6049a2cb6e8262 127-148
+Tests/SottoDictionaryTests/vectors.json
+  s_54db94c607acba::t_6272d29b64d947 721-749
+Sources/Sotto/App/AppComposition.swift
+  s_54db94c607acba::t_2b97a369e50cf7 42
+Tests/SottoDictionaryTests/DictionaryCorrectorBiasTests.swift
+  s_54db94c607acba::t_6272d29b64d947 72-123
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "43f2c63e7ec22ac3977098643da3bdcbf682c4eb",
+  "prompts": {},
+  "sessions": {
+    "s_54db94c607acba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9cec764-c6e0-4aee-98d4-309aa9357e9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
