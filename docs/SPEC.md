@@ -144,7 +144,7 @@ with what was being attempted.
     var smartCleanup: Bool               // default false (Foundation Model cleanup)
     var soundEnabled: Bool               // default true
     var speechEngine: SpeechEngineChoice // default .apple (§6.6a)
-    var eraseKey: EraseKey               // default .delete (§6.16)
+    var eraseKey: EraseKey               // default .rightCommand (§6.16)
 }
 ```
 
@@ -227,8 +227,9 @@ Behaviour:
   loop. Extract plain values (`keyCode`, `flags`, `type`) from the `CGEvent` first, then
   cross into the main actor. `MainActor.assumeIsolated` is permitted **here only**, with a
   comment saying why; nowhere else in the app.
-- A second tap, for the erase key, is enabled only while the key is held (§6.16); both taps
-  share the one callback, so the `assumeIsolated` site stays single.
+- A modifier erase key (§6.16) is handled in this same `.flagsChanged` tap. A non-modifier
+  erase key needs a second tap, enabled only while the key is held; both taps share the one
+  callback, so the `assumeIsolated` site stays single.
 - `stop()` disables the tap, removes the run loop source, and resets `isPressed` **without
   emitting a release**; the controller is responsible for ending any utterance before it
   stops or reloads the monitor (§6.7).
@@ -1222,7 +1223,9 @@ closure with the pipeline; B2 adds the HUD; C1 adds the scenes.
 
 ### 6.16 Erase last dictation — `Core/DictationEraser.swift`, `Core/EraseKey.swift`
 
-**What the user does.** Hold the push-to-talk key and tap the erase key (Delete by default).
+**What the user does.** Hold the push-to-talk key and tap the erase key: by default the
+other right-hand modifier, Right ⌘ next to Right ⌥, so the whole gesture stays under one
+hand.
 The text Sotto last typed disappears, the start sound plays, and Sotto is listening again,
 so the user keeps holding and says it again; the new text lands where the old text was.
 Releasing right after the tap only erases. Whatever was said in the same hold *before* the
@@ -1232,9 +1235,12 @@ otherwise nothing is touched and the HUD says why.
 
 ```swift
 enum EraseKey: String, CaseIterable, Sendable {
-    case delete, escape, z, off
-    var keyCodes: Set<Int64>   // delete: [51, 117] (kVK_Delete, kVK_ForwardDelete), escape: [53], z: [6], off: []
-    var displayName: String    // "⌫", "esc", "Z", "Off"
+    case rightCommand, rightOption, delete, escape, off
+    var keyCodes: Set<Int64>   // rightCommand: [54], rightOption: [61], delete: [51, 117]
+                               // (kVK_Delete, kVK_ForwardDelete), escape: [53], off: []
+    var modifierFlag: CGEventFlags?  // the device bit for the two modifiers (0x10, 0x40), nil otherwise
+    var displayName: String    // "Right ⌘", "Right ⌥", "⌫", "esc", "Off"
+    func conflicts(with key: PushToTalkKey) -> Bool   // same physical key as push to talk
 }
 
 enum EraseOutcome: Sendable, Equatable {
@@ -1329,17 +1335,28 @@ copied). Decide. Then:
 Log the plan, the strategy, the UTF-16 and Character counts, and the duration; never the
 text.
 
-**Hotkey.** `HotkeyMonitor` gains a second session tap (`.defaultTap`, `.headInsertEventTap`)
-for `.keyDown | .keyUp`, created in `start()` but **enabled only while the push-to-talk key
-is pressed** and disabled on release and in `stop()`, so ordinary typing never passes
-through Sotto. Its callback, reduced to plain values the same way (the one
-`assumeIsolated` site covers both taps; they share the callback), handles an event whose
-keycode is in `eraseKey.keyCodes`: the first key-down fires `onErase`, auto-repeats
-(`.keyboardEventAutorepeat` non-zero) are swallowed without firing, and the matching key-up
-is swallowed. The target app never sees the erase key, so Option-Delete (delete word) or
-Command-Delete (delete line) cannot also run. Every other key passes through untouched.
-`eraseKey == .off` never creates the second tap. A failure to create it is logged and
-leaves dictation working without erase.
+**Hotkey.** Two cases, by the kind of erase key.
+
+- **Modifier erase key** (`rightCommand`, `rightOption`; the default). Handled in the
+  existing `.flagsChanged` tap, so no new tap exists. A `.flagsChanged` whose keycode is the
+  erase key's and whose flags contain its device bit, arriving while the push-to-talk key is
+  pressed, fires `onErase` and is swallowed. Its matching release (the device bit clears) is
+  swallowed too, **whether or not push to talk is still held**, so the target never sees a
+  lone Command or Option up without its down; a monitor flag `eraseModifierDown` tracks
+  this and is reset in `stop()`. The same modifier while push to talk is *not* held passes
+  through untouched, so Right ⌘ keeps working for shortcuts. A second erase-key down while
+  `eraseModifierDown` is already true (a lost up) fires nothing.
+- **Non-modifier erase key** (`delete`, `escape`). `HotkeyMonitor` adds a second session tap
+  (`.defaultTap`, `.headInsertEventTap`) for `.keyDown | .keyUp`, created in `start()` but
+  **enabled only while the push-to-talk key is pressed** and disabled on release and in
+  `stop()`, so ordinary typing never passes through Sotto. It handles an event whose keycode
+  is in `eraseKey.keyCodes`: the first key-down fires `onErase`, auto-repeats
+  (`.keyboardEventAutorepeat` non-zero) are swallowed without firing, and the matching
+  key-up is swallowed. The target never sees the erase key, so Option-Delete (delete word)
+  cannot also run. Every other key passes through. A failure to create the tap is logged
+  and leaves dictation working without erase.
+
+`off` installs nothing. Both paths share the one callback and its single `assumeIsolated`.
 
 **Controller.** `onErase` → `erase()`:
 
@@ -1360,8 +1377,13 @@ leaves dictation working without erase.
   `.erasing` is queued exactly like a press during `.finishing`. `deactivate()` and
   `reloadHotkey()` clear `eraseRestartPending`; the erase in flight completes.
 
-**Settings.** `Settings.eraseKey` (default `.delete`), read by `HotkeyMonitor` on
-`start()`, so `reloadHotkey()` applies a change. The push-to-talk key stays as §6.4.
+**Settings.** `Settings.eraseKey` (default `.rightCommand`), read by `HotkeyMonitor` on
+`start()`, so `reloadHotkey()` applies a change. The push-to-talk key stays as §6.4. The
+erase key can never be the push-to-talk key: the Settings picker disables the conflicting
+option, and setting `pushToTalkKey` to a key that conflicts with the current `eraseKey` moves
+`eraseKey` to the other right-hand modifier (Right ⌥ push to talk → Right ⌘ erase and vice
+versa; fn push to talk keeps whatever it had). Settings enforces this in the setter, so a
+stale `UserDefaults` pair is repaired on load too.
 
 **Tests** (written first):
 
@@ -1375,9 +1397,17 @@ leaves dictation working without erase.
   reads behind injectable seams: a landing records; a user key-down, click or app switch
   clears `untouched`; an event carrying the marker does not; a new landing replaces the
   record; an attempt clears it.
-- `HotkeyMonitorTests`: erase key down while held fires `onErase` once and is swallowed;
-  autorepeat and key-up are swallowed without firing; the erase key while not held is not
-  seen (tap disabled) and passes; fn held + keycode 117 fires for `.delete`; `.off` fires
+- `SettingsTests`: the default pair is Right ⌥ / Right ⌘; switching push to talk to Right ⌘
+  moves erase to Right ⌥ and back; fn keeps the erase key; a conflicting stored pair is
+  repaired on load.
+- `HotkeyMonitorTests`, modifier erase key: Right ⌘ down while Right ⌥ held fires `onErase`
+  once and is swallowed; its up is swallowed, also after push to talk was released first;
+  Right ⌘ while push to talk is not held passes and fires nothing; a repeated down without
+  an up fires nothing; `stop()` resets the state.
+- `HotkeyMonitorTests`, non-modifier erase key: erase key down while held fires `onErase`
+  once and is swallowed; autorepeat and key-up are swallowed without firing; the erase key
+  while not held is not seen (tap disabled) and passes; fn held + keycode 117 fires for
+  `.delete`; `.off` fires
   nothing; other keys pass while held.
 - `DictationControllerTests` and the `DictationOrderTests` matrix gain the erase event and
   the `.erasing` state: erase while listening → engine cancelled, no callback, eraser
@@ -1476,6 +1506,8 @@ Things that look wrong and are not, or look fine and will bite:
 - Mutating `@State` inside a `Canvas` or `TimelineView` draw closure floods the log; keep
   animation physics in a plain reference type the view holds.
 - Never build inside an iCloud-synced folder; the Makefile's scratch path exists for this.
+- A swallowed erase modifier must also have its up swallowed, even after push to talk is
+  released, or apps see a Command or Option up with no down (§6.16).
 - With fn held, the Delete key arrives as Forward Delete (keycode 117), not 51; the
   `.delete` erase key matches both (§6.16).
 - Sotto's own ⌘V and backspaces reach the global input monitor; mark them with
