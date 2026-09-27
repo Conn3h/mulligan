@@ -535,17 +535,95 @@ struct DictationControllerTests {
         // rather than sitting in .finishing forever (the reported quick-tap wedge).
         let finishGate = Gate(open: false)
         let engine = FakeEngine(.init(finishGate: finishGate))
-        let harness = Harness(engines: [engine], engineFinishTimeout: .milliseconds(150))
+        let harness = Harness(
+            engines: [engine],
+            errorDisplayDuration: .milliseconds(100),
+            engineFinishTimeout: .milliseconds(150)
+        )
         harness.controller.activate()
         try await harness.pressAndListen()
 
         harness.hotkey.release()
         #expect(harness.state == .finishing)
 
-        try await settle("idle after finish timeout", timeout: .seconds(2)) { harness.state == .idle }
+        // Nothing was transcribed before the timeout: say so rather than going quietly idle.
+        try await settle("error after finish timeout", timeout: .seconds(2)) {
+            harness.state == .error(DictationController.transcriptionTimedOutMessage)
+        }
         #expect(await engine.cancelCalls >= 1)
         #expect(harness.received.isEmpty)
+        try await settle("idle after the error", timeout: .seconds(2)) { harness.state == .idle }
         #expect(harness.controller.liveTaskCount == 0)
+    }
+
+    @Test func finishTimeoutGrowsWithTheHoldUpToACap() {
+        let base = Duration.seconds(2)
+        #expect(DictationController.finishTimeout(base: base, heldSeconds: 0) == base)
+        #expect(DictationController.finishTimeout(base: base, heldSeconds: 12) > .seconds(4))
+        #expect(DictationController.finishTimeout(base: base, heldSeconds: 180) == DictationController.finishTimeoutCap)
+    }
+
+    // MARK: Speech gate
+
+    @Test func silentHoldIsDiscardedBySpeechGate() async throws {
+        let engine = FakeEngine(.init(finalText: "Mm-."))
+        let harness = Harness(engines: [engine], speechGate: SpeechGate(voicedLevel: 0.3, minimumVoicedBlocks: 2))
+        harness.controller.activate()
+        try await harness.pressAndListen()
+        for _ in 0..<6 {
+            #expect(harness.capture.emitLevel(0.05))
+        }
+        try await Task.sleep(for: .milliseconds(30))
+        try await harness.releaseAndIdle()
+        #expect(harness.received.isEmpty)
+        #expect(await engine.finishCalls == 1)
+    }
+
+    @Test func voicedHoldPassesSpeechGate() async throws {
+        let engine = FakeEngine(.init(finalText: "yes"))
+        let harness = Harness(engines: [engine], speechGate: SpeechGate(voicedLevel: 0.3, minimumVoicedBlocks: 2))
+        harness.controller.activate()
+        try await harness.pressAndListen()
+        for level: Float in [0.05, 0.6, 0.7, 0.1] {
+            #expect(harness.capture.emitLevel(level))
+        }
+        try await Task.sleep(for: .milliseconds(30))
+        try await harness.releaseAndIdle()
+        #expect(harness.received.map(\.text) == ["yes"])
+    }
+
+    @Test func singleLoudBlockDoesNotPassSpeechGate() async throws {
+        // A key click or a bump is one loud block, not speech.
+        let engine = FakeEngine(.init(finalText: "Mm-."))
+        let harness = Harness(engines: [engine], speechGate: SpeechGate(voicedLevel: 0.3, minimumVoicedBlocks: 2))
+        harness.controller.activate()
+        try await harness.pressAndListen()
+        for level: Float in [0.05, 0.9, 0.05] {
+            #expect(harness.capture.emitLevel(level))
+        }
+        try await Task.sleep(for: .milliseconds(30))
+        try await harness.releaseAndIdle()
+        #expect(harness.received.isEmpty)
+    }
+
+    // MARK: Sources
+
+    @Test func hotkeyReleaseDoesNotEndAButtonRecording() async throws {
+        let engine = FakeEngine(.init(finalText: "from the window"))
+        let harness = Harness(engines: [engine])
+        harness.controller.activate()
+
+        harness.controller.startButtonRecording()
+        try await settle("listening") { harness.state == .listening }
+        // The user taps the push-to-talk key (Right Command for Command-Tab, say).
+        harness.hotkey.press()
+        harness.hotkey.release()
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(harness.state == .listening)
+
+        harness.controller.stopButtonRecording()
+        try await settle("idle") { harness.state == .idle }
+        #expect(harness.received.map(\.text) == ["from the window"])
     }
 }
 
