@@ -40,6 +40,19 @@ struct HistoryDaysTests {
         #expect(days[1].runs.count == 1)
     }
 
+    @Test func runsOfOneDayMergeEvenWhenNotAdjacent() {
+        // History is in insertion order; a clock or time-zone change can interleave days.
+        let runs = [
+            run("today late", at(day: 28, hour: 10)),
+            run("yesterday", at(day: 27, hour: 18)),
+            run("today early", at(day: 28, hour: 9)),
+        ]
+        let days = HistoryDays.group(runs, now: now, calendar: calendar, locale: locale)
+        #expect(days.map(\.title) == ["Today", "Yesterday"])
+        #expect(days[0].runs.map(\.text) == ["today late", "today early"])
+        #expect(Set(days.map(\.id)).count == days.count)
+    }
+
     @Test func aDayFromAnotherYearCarriesTheYear() {
         let days = HistoryDays.group([run("old", at(day: 3, month: 1, year: 2025, hour: 12))], now: now, calendar: calendar, locale: locale)
         #expect(days.map(\.title) == ["3 January 2025"])

@@ -13,41 +13,25 @@ struct HistoryDay: Identifiable {
 /// Splits History into day sections (spec §6.14). Pure, so the grouping and the titles are
 /// tested without a view.
 enum HistoryDays {
-    /// `runs` must be newest first, as `HistoryStore.runs` is; days come out newest first
-    /// and each keeps its runs in that order.
+    /// Days come out newest first, each with its runs newest first. Runs are grouped by
+    /// calendar day over the whole list, not by adjacency: History is in insertion order,
+    /// and a clock or time-zone change can interleave days in it.
     static func group(
         _ runs: [DictationRun],
         now: Date = Date(),
         calendar: Calendar = .current,
         locale: Locale = .current
     ) -> [HistoryDay] {
-        var days: [HistoryDay] = []
-        var current: [DictationRun] = []
-        var currentStart: Date?
-
-        func close() {
-            guard let start = currentStart, !current.isEmpty else {
-                return
-            }
-            days.append(HistoryDay(
+        let byDay = Dictionary(grouping: runs) { calendar.startOfDay(for: $0.date) }
+        return byDay.keys.sorted(by: >).map { start in
+            let dayRuns = (byDay[start] ?? []).sorted { $0.date > $1.date }
+            return HistoryDay(
                 id: start,
                 title: title(for: start, now: now, calendar: calendar, locale: locale),
-                runs: current,
-                wordCount: current.reduce(0) { $0 + wordCount($1.text) }
-            ))
+                runs: dayRuns,
+                wordCount: dayRuns.reduce(0) { $0 + wordCount($1.text) }
+            )
         }
-
-        for run in runs {
-            let start = calendar.startOfDay(for: run.date)
-            if start != currentStart {
-                close()
-                current = []
-                currentStart = start
-            }
-            current.append(run)
-        }
-        close()
-        return days
     }
 
     static func title(for day: Date, now: Date, calendar: Calendar, locale: Locale) -> String {

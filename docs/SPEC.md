@@ -1173,7 +1173,11 @@ readout uses monospaced digits), `Border` (hairline 1), `Motion` (quick 0.12 s, 
 0.2 s, hud 0.16 s), and `Metric` (hudWidth 340, hudHeight 76, hudBottomOffset 96,
 hudBarCount 12, hudBarFloor 3, hudBarWidth 3, hudBarSpacing 3, meterBarCount 12,
 windowDefaultWidth 860, windowDefaultHeight 620, windowMinWidth 720, windowMinHeight 520,
-copiedFeedbackSeconds 1.4). **Views must not contain literal colours, sizes, radii, fonts
+copiedFeedbackSeconds 1.4). v1.5 adds `headerHeight`, `headerGap`,
+`windowControlsClearance`, `statusDotSize`, `iconButtonSize`, `rowButtonSize`,
+`settingsWidth`, `welcomeWidth` and `welcomeGlyphHeight` to `Metric`, and the `DS.TeeShot`
+geometry; the `hudBar*` and `meterBarCount` tokens stay defined but the HUD no longer uses
+them. **Views must not contain literal colours, sizes, radii, fonts
 or durations.** If a component needs a value that is not a token, **add the token**: later
 batches may append to `DesignSystem.swift` (never rename or remove existing tokens).
 Colours adapt to light/dark via `Color(nsColor: NSColor(name:dynamicProvider:))`; verify
