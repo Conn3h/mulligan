@@ -46,6 +46,13 @@ struct SpeechEvidenceTests {
         #expect(!SpeechEvidence.isSilent([0.34, 1.00]))
     }
 
+    /// Without the start sound the first window holds nothing of Sotto's, so a quick word
+    /// that lives only there counts (Codex, round 4).
+    @Test func withoutTheStartSoundTheFirstWindowCounts() {
+        #expect(!SpeechEvidence.isSilent([0.94, 0.05], ignoringFirstWindow: false))
+        #expect(SpeechEvidence.isSilent([0.30, 0.05], ignoringFirstWindow: false))
+    }
+
     @Test func noWindowsIsNotEvidenceOfSilence() {
         #expect(!SpeechEvidence.isSilent([]))
     }

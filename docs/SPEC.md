@@ -627,8 +627,9 @@ swallows short words.
 3 s, the engine keeps the audio and, before yielding the final text, scores it with FluidAudio's
 Silero speech detector (`VadManager`, loaded with the Parakeet models); when no 256 ms window
 reaches `SpeechEvidence.threshold` (0.7, `SottoText`), the final text is empty and nothing is
-typed. The first window is left out whenever later ones exist: it holds Sotto's own start
-sound and the key click, which scored 0.94 on one silent hold. Measured 2026-09-27 on 18
+typed. When the start sound is on, the first window is left out whenever later ones exist: it
+holds that sound, which scored 0.94 on one silent hold. With the sound off it counts, so a
+quick word spoken only in the first 256 ms is never dropped (Codex round 4). Measured 2026-09-27 on 18
 silent holds and 16 one-word answers: with the first window left out, silent holds peaked at
 0.02–0.46 and answers at 0.86–1.00; the check took about 2 ms. Longer holds, a detector that failed to load, or a
 detector error keep the text (logged). This is a speech model, not a loudness gate.

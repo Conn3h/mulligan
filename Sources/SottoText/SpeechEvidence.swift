@@ -8,12 +8,14 @@ public enum SpeechEvidence {
     /// in that gap.
     public static let threshold: Float = 0.7
 
-    /// True when no window reaches `threshold`. The first window is left out whenever later
-    /// ones exist: it holds Sotto's own start sound and the key click, which once scored 0.94
-    /// on a silent hold, while every measured answer peaked in a later window. No windows at
-    /// all proves nothing, so it is not silence.
-    public static func isSilent(_ windowProbabilities: [Float]) -> Bool {
-        let judged = windowProbabilities.count > 1 ? windowProbabilities.dropFirst() : windowProbabilities[...]
+    /// True when no window reaches `threshold`. With `ignoringFirstWindow` (the start sound
+    /// played), the first window is left out whenever later ones exist: it holds that sound,
+    /// which once scored 0.94 on a silent hold, while every measured answer peaked in a later
+    /// window. Without the sound it counts, so a quick word that lives only there is kept. No
+    /// windows at all proves nothing, so it is not silence.
+    public static func isSilent(_ windowProbabilities: [Float], ignoringFirstWindow: Bool = true) -> Bool {
+        let skipFirst = ignoringFirstWindow && windowProbabilities.count > 1
+        let judged = skipFirst ? windowProbabilities.dropFirst() : windowProbabilities[...]
         guard let peak = judged.max() else {
             return false
         }

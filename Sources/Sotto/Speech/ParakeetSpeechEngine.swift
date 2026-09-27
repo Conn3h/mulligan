@@ -79,8 +79,13 @@ actor ParakeetSpeechEngine: TranscriptionEngine {
     private var probeOverflowed = false
     private var vad: VadManager?
 
-    init(biasPhrases: [String] = []) {
+    /// Whether this hold's start sound plays: its first speech-detector window then holds that
+    /// sound and is left out of the speech check (§6.7).
+    private let startSoundPlays: Bool
+
+    init(biasPhrases: [String] = [], startSoundPlays: Bool = true) {
         self.biasPhrases = biasPhrases
+        self.startSoundPlays = startSoundPlays
     }
 
     // MARK: TranscriptionEngine
@@ -146,7 +151,7 @@ actor ParakeetSpeechEngine: TranscriptionEngine {
         probeSamples = []
         do {
             let probabilities = try await vad.process(samples).map(\.probability)
-            let silent = SpeechEvidence.isSilent(probabilities)
+            let silent = SpeechEvidence.isSilent(probabilities, ignoringFirstWindow: startSoundPlays)
             let listed = probabilities.map { String(format: "%.2f", $0) }.joined(separator: " ")
             Log.speech.info(
                 "speech check: \(Double(samples.count) / 16_000, format: .fixed(precision: 2), privacy: .public) s, windows [\(listed, privacy: .public)], \(silent ? "no speech; dropping" : "speech; keeping", privacy: .public) \(text.count, privacy: .public) chars"

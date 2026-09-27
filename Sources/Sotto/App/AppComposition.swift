@@ -39,7 +39,10 @@ final class AppComposition {
                 case .apple:
                     return AppleSpeechEngine(locale: .current, biasPhrases: DictionaryStore.shared.biasPhrases)
                 case .parakeet:
-                    return ParakeetSpeechEngine(biasPhrases: DictionaryStore.shared.vocabularyPhrases)
+                    return ParakeetSpeechEngine(
+                        biasPhrases: DictionaryStore.shared.vocabularyPhrases,
+                        startSoundPlays: Settings.shared.soundEnabled
+                    )
                 }
             },
             eraseLast: { token in
