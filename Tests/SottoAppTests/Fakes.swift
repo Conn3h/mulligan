@@ -94,8 +94,10 @@ func settle(
 @MainActor
 final class FakeHotkey: HotkeySource {
     var key: PushToTalkKey = .rightOption
+    var eraseKey: EraseKey = .rightCommand
     var onPress: (() -> Void)?
     var onRelease: (() -> Void)?
+    var onErase: (() -> Void)?
     var startResult = true
     private(set) var startCalls = 0
     private(set) var stopCalls = 0
@@ -121,6 +123,10 @@ final class FakeHotkey: HotkeySource {
 
     func release() {
         onRelease?()
+    }
+
+    func erase() {
+        onErase?()
     }
 }
 

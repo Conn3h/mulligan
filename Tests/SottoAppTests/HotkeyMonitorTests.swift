@@ -86,4 +86,139 @@ struct HotkeyMonitorTests {
         _ = monitor.handle(type: .flagsChanged, keyCode: PushToTalkKey.rightOption.keyCode, flags: [])
         #expect(releases == 0)
     }
+    // MARK: Erase modifier (§6.16)
+
+    private func erase(_ down: Bool, _ key: EraseKey = .rightCommand) -> (CGEventType, Int64, CGEventFlags) {
+        (.flagsChanged, key.keyCode!, down ? key.flag! : [])
+    }
+
+    private func armed(pttDown: Bool = true, eraseDown: Bool = false) -> (HotkeyMonitor, KeyBoard) {
+        let monitor = HotkeyMonitor()
+        monitor.key = .rightOption
+        monitor.eraseKey = .rightCommand
+        let board = KeyBoard()
+        board.pttDown = pttDown
+        board.eraseDown = eraseDown
+        monitor.isKeyDown = { _ in board.pttDown }
+        monitor.isEraseKeyDown = { _ in board.eraseDown }
+        monitor.onPress = { board.events.append("press") }
+        monitor.onRelease = { board.events.append("release") }
+        monitor.onErase = { board.events.append("erase") }
+        return (monitor, board)
+    }
+
+    private func send(_ monitor: HotkeyMonitor, _ event: (CGEventType, Int64, CGEventFlags)) -> Bool {
+        monitor.handle(type: event.0, keyCode: event.1, flags: event.2)
+    }
+
+    @Test func eraseDownWhileHeldFiresOnceAndIsSwallowedWithItsUp() {
+        let (monitor, board) = armed()
+        _ = send(monitor, pressEvent(.rightOption))
+        #expect(send(monitor, erase(true)))
+        #expect(send(monitor, erase(false)))
+        #expect(board.events == ["press", "erase"])
+    }
+
+    @Test func eraseUpIsSwallowedAfterPushToTalkWasReleasedFirst() {
+        let (monitor, board) = armed()
+        _ = send(monitor, pressEvent(.rightOption))
+        _ = send(monitor, erase(true))
+        board.pttDown = false
+        _ = monitor.handle(type: .flagsChanged, keyCode: PushToTalkKey.rightOption.keyCode, flags: [])
+        #expect(send(monitor, erase(false)))
+        #expect(board.events == ["press", "erase", "release"])
+    }
+
+    @Test func eraseKeyWithoutPushToTalkPassesAndFiresNothing() {
+        let (monitor, board) = armed(pttDown: false)
+        #expect(!send(monitor, erase(true)))
+        #expect(!send(monitor, erase(false)))
+        #expect(board.events.isEmpty)
+    }
+
+    @Test func aStalePressedStateDoesNotTurnCommandIntoErase() {
+        let (monitor, board) = armed()
+        _ = send(monitor, pressEvent(.rightOption))
+        board.pttDown = false  // released, but the up was lost
+        #expect(!send(monitor, erase(true)))
+        #expect(board.events == ["press"])
+    }
+
+    @Test func aRepeatedEraseDownWithoutAnUpFiresOnce() {
+        let (monitor, board) = armed()
+        _ = send(monitor, pressEvent(.rightOption))
+        _ = send(monitor, erase(true))
+        #expect(send(monitor, erase(true)))
+        #expect(board.events == ["press", "erase"])
+    }
+
+    @Test func eraseKeyFirstThenPushToTalkErasesAndPassesTheEraseUp() {
+        let (monitor, board) = armed(eraseDown: true)
+        _ = send(monitor, pressEvent(.rightOption))
+        #expect(board.events == ["press", "erase"])
+        #expect(!send(monitor, erase(false)))
+    }
+
+    @Test func aPassedThroughDownClearsAStaleSwallowFlag() {
+        let (monitor, board) = armed()
+        _ = send(monitor, pressEvent(.rightOption))
+        _ = send(monitor, erase(true))  // its up is then lost
+        board.pttDown = false
+        _ = monitor.handle(type: .flagsChanged, keyCode: PushToTalkKey.rightOption.keyCode, flags: [])
+        #expect(!send(monitor, erase(true)))   // an ordinary Command down reaches the app
+        #expect(!send(monitor, erase(false)))  // and so must its up
+    }
+
+    @Test func tapReenableClearsALostEraseUp() {
+        let (monitor, board) = armed()
+        _ = send(monitor, pressEvent(.rightOption))
+        _ = send(monitor, erase(true))
+        board.eraseDown = false
+        _ = monitor.handle(type: .tapDisabledByTimeout, keyCode: 0, flags: [])
+        board.pttDown = false
+        _ = monitor.handle(type: .flagsChanged, keyCode: PushToTalkKey.rightOption.keyCode, flags: [])
+        #expect(!send(monitor, erase(false)))
+    }
+
+    @Test func stopClearsTheSwallowFlag() {
+        let (monitor, board) = armed()
+        _ = send(monitor, pressEvent(.rightOption))
+        _ = send(monitor, erase(true))
+        monitor.stop()
+        board.pttDown = false
+        #expect(!send(monitor, erase(false)))
+    }
+
+    @Test func eraseOffFiresNothing() {
+        let (monitor, board) = armed()
+        monitor.eraseKey = .off
+        _ = send(monitor, pressEvent(.rightOption))
+        #expect(!send(monitor, erase(true)))
+        #expect(board.events == ["press"])
+    }
+
+    @Test func aConflictingPairNeverSwallowsPushToTalk() {
+        let (monitor, board) = armed()
+        monitor.eraseKey = .rightOption
+        _ = send(monitor, pressEvent(.rightOption))
+        _ = monitor.handle(type: .flagsChanged, keyCode: PushToTalkKey.rightOption.keyCode, flags: [])
+        #expect(board.events == ["press", "release"])
+    }
+
+    @Test func rightOptionAsTheEraseKeyWorksWithRightCommandAsPushToTalk() {
+        let (monitor, board) = armed()
+        monitor.key = .rightCommand
+        monitor.eraseKey = .rightOption
+        _ = send(monitor, pressEvent(.rightCommand))
+        #expect(send(monitor, erase(true, .rightOption)))
+        #expect(board.events == ["press", "erase"])
+    }
+}
+
+/// Physical key state and the callbacks a test observed.
+@MainActor
+private final class KeyBoard {
+    var events: [String] = []
+    var pttDown = true
+    var eraseDown = false
 }
