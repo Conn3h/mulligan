@@ -41,8 +41,7 @@ final class AppComposition {
                 case .parakeet:
                     return ParakeetSpeechEngine(biasPhrases: DictionaryStore.shared.biasPhrases)
                 }
-            },
-            speechGate: .standard
+            }
         )
         controller.onFinalTranscript = { raw, utterance in
             await pipeline.process(raw: raw, utterance: utterance)

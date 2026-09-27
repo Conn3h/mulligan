@@ -357,8 +357,7 @@ final class Harness {
         engineFinishTimeout: Duration = .seconds(2),
         minimumHold: Duration = .zero,
         maxHold: Duration = .seconds(180),
-        deliveryTimeout: Duration = .seconds(10),
-        speechGate: SpeechGate = .disabled
+        deliveryTimeout: Duration = .seconds(10)
     ) {
         let hotkey = FakeHotkey()
         let capture = FakeCapture()
@@ -379,8 +378,7 @@ final class Harness {
             engineFinishTimeout: engineFinishTimeout,
             minimumHold: minimumHold,
             maxHold: maxHold,
-            deliveryTimeout: deliveryTimeout,
-            speechGate: speechGate
+            deliveryTimeout: deliveryTimeout
         )
         controller.onFinalTranscript = { [weak self] text, utterance in
             self?.received.append((text: text, utterance: utterance))

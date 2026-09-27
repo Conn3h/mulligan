@@ -564,47 +564,30 @@ struct DictationControllerTests {
         #expect(DictationController.finishTimeout(base: base, heldSeconds: 180) == DictationController.finishTimeoutCap)
     }
 
-    // MARK: Speech gate
+    // MARK: Filler-only transcripts
 
-    @Test func silentHoldIsDiscardedBySpeechGate() async throws {
+    @Test func fillerOnlyTranscriptIsDiscarded() async throws {
         let engine = FakeEngine(.init(finalText: "Mm-."))
-        let harness = Harness(engines: [engine], speechGate: SpeechGate(voicedLevel: 0.3, minimumVoicedBlocks: 2))
+        let harness = Harness(engines: [engine])
         harness.controller.activate()
         try await harness.pressAndListen()
-        for _ in 0..<6 {
-            #expect(harness.capture.emitLevel(0.05))
-        }
-        try await Task.sleep(for: .milliseconds(30))
         try await harness.releaseAndIdle()
         #expect(harness.received.isEmpty)
         #expect(await engine.finishCalls == 1)
     }
 
-    @Test func voicedHoldPassesSpeechGate() async throws {
-        let engine = FakeEngine(.init(finalText: "yes"))
-        let harness = Harness(engines: [engine], speechGate: SpeechGate(voicedLevel: 0.3, minimumVoicedBlocks: 2))
+    @Test func quietOneWordAnswerIsDelivered() async throws {
+        // The level stays low throughout: a quiet "yes" must still be typed.
+        let engine = FakeEngine(.init(finalText: "Yes."))
+        let harness = Harness(engines: [engine])
         harness.controller.activate()
         try await harness.pressAndListen()
-        for level: Float in [0.05, 0.6, 0.7, 0.1] {
+        for level: Float in [0.2, 0.25, 0.22] {
             #expect(harness.capture.emitLevel(level))
         }
         try await Task.sleep(for: .milliseconds(30))
         try await harness.releaseAndIdle()
-        #expect(harness.received.map(\.text) == ["yes"])
-    }
-
-    @Test func singleLoudBlockDoesNotPassSpeechGate() async throws {
-        // A key click or a bump is one loud block, not speech.
-        let engine = FakeEngine(.init(finalText: "Mm-."))
-        let harness = Harness(engines: [engine], speechGate: SpeechGate(voicedLevel: 0.3, minimumVoicedBlocks: 2))
-        harness.controller.activate()
-        try await harness.pressAndListen()
-        for level: Float in [0.05, 0.9, 0.05] {
-            #expect(harness.capture.emitLevel(level))
-        }
-        try await Task.sleep(for: .milliseconds(30))
-        try await harness.releaseAndIdle()
-        #expect(harness.received.isEmpty)
+        #expect(harness.received.map(\.text) == ["Yes."])
     }
 
     @Test func captureInterruptionEndsTheUtteranceWithItsMessage() async throws {

@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import Foundation
 import Observation
+import SottoText
 
 enum UtteranceSource: String, Sendable {
     case hotkey
@@ -98,9 +99,8 @@ final class DictationController {
         var consumeTask: Task<Void, Never>?
         var terminalTask: Task<Void, Never>?
         var watchdogTask: Task<Void, Never>?
-        /// Loudest raw meter level this hold, and how many blocks reached the speech gate.
+        /// Loudest raw meter level this hold, logged at release for diagnosis.
         var peakLevel: Float = 0
-        var voicedBlocks = 0
 
         init(id: Int, source: UtteranceSource, pressedAt: ContinuousClock.Instant) {
             self.id = id
@@ -178,8 +178,6 @@ final class DictationController {
     /// controller stops waiting and returns to idle; the in-flight delivery is left to finish
     /// on its own rather than cancelled mid-paste.
     @ObservationIgnored private let deliveryTimeout: Duration
-    /// Discards a release whose audio never reached speech level; see `SpeechGate`.
-    @ObservationIgnored private let speechGate: SpeechGate
     @ObservationIgnored private let clock = ContinuousClock()
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var session: Session?
@@ -194,8 +192,7 @@ final class DictationController {
         engineFinishTimeout: Duration = .seconds(2),
         minimumHold: Duration = .milliseconds(250),
         maxHold: Duration = .seconds(180),
-        deliveryTimeout: Duration = .seconds(10),
-        speechGate: SpeechGate = .disabled
+        deliveryTimeout: Duration = .seconds(10)
     ) {
         self.hotkey = hotkey
         self.capture = capture
@@ -206,7 +203,6 @@ final class DictationController {
         self.minimumHold = minimumHold
         self.maxHold = maxHold
         self.deliveryTimeout = deliveryTimeout
-        self.speechGate = speechGate
     }
 
     // MARK: Public controls
@@ -480,9 +476,6 @@ final class DictationController {
             return
         }
         session.peakLevel = max(session.peakLevel, value)
-        if speechGate.isVoiced(value) {
-            session.voicedBlocks += 1
-        }
         level += (value - level) * Self.levelSmoothing
     }
 
@@ -566,22 +559,23 @@ final class DictationController {
         // 4. The consume task ends when the snapshot stream finishes.
         await session.consumeTask?.value
 
-        // 5. Hand over the final text, unless the audio never reached speech level.
+        // 5. Hand over the final text, unless it is only a hesitation sound: Parakeet turns
+        // a silent hold into "Mm-.". Loudness cannot decide this; on a laptop mic in a normal
+        // room, quiet one-word answers peak no higher than a silent hold's background noise.
         var endingError: String?
         if reason.isRelease {
             let raw = transcript
-            let heardSpeech = speechGate.heardSpeech(voicedBlocks: session.voicedBlocks)
             Log.app.info(
-                "utterance \(session.id, privacy: .public) audio: peak level \(session.peakLevel, format: .fixed(precision: 2), privacy: .public), \(session.voicedBlocks, privacy: .public) voiced blocks, speech heard: \(heardSpeech, privacy: .public)"
+                "utterance \(session.id, privacy: .public) audio: peak level \(session.peakLevel, format: .fixed(precision: 2), privacy: .public)"
             )
             if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Log.app.info("utterance \(session.id, privacy: .public) blank transcript; no callback")
                 if finishTimedOut {
                     endingError = Self.transcriptionTimedOutMessage
                 }
-            } else if !heardSpeech {
+            } else if FillerOnly.matches(raw) {
                 Log.app.info(
-                    "utterance \(session.id, privacy: .public) no speech heard; discarding \(raw.count, privacy: .public) chars"
+                    "utterance \(session.id, privacy: .public) transcript is only a filler sound; discarding \(raw.count, privacy: .public) chars"
                 )
             } else {
                 if finishTimedOut {
