@@ -458,8 +458,7 @@ struct Utterance: Sendable {
          engineFinishTimeout: Duration = .seconds(2),   // cap on engine.finish() in the terminal path
          minimumHold: Duration = .milliseconds(250),    // a shorter release is a mis-tap: cancel, don't finalize
          maxHold: Duration = .seconds(180),             // cap on .listening: a stuck recording ends as a release
-         deliveryTimeout: Duration = .seconds(10),      // cap on onFinalTranscript so a hung pipeline cannot wedge .finishing
-         speechGate: SpeechGate = .disabled)            // discards a release whose audio never reached speech level; see below
+         deliveryTimeout: Duration = .seconds(10))      // cap on onFinalTranscript so a hung pipeline cannot wedge .finishing
 
     /// Receives the final raw transcript once per utterance. Awaited before returning to idle.
     /// A returned message (the text was recorded but not typed) is shown as the ending error.
@@ -499,10 +498,11 @@ state `.starting`, transcript cleared, `holdStartedAt` set. Start the **setup ta
    stream { await engine.feed(chunk) }`.
 5. `try capture.start(outputFormat:onBuffer:onLevel:onInterruption:)` with `onBuffer`
    yielding into the continuation; `onLevel` hopping to the main actor to apply
-   `level += (new - level) * 0.35`, track the hold's peak level, and feed the speech gate
-   (below), all only if the generation is still current; and `onInterruption` hopping to the
-   main actor to end the utterance as `.failed(message)` if the generation is still live
-   (capture could not survive a device change, §6.5).
+   `level += (new - level) * 0.35` and track the hold's peak level (logged at release), both
+   only if the generation is still current; and `onInterruption` hopping to the main actor
+   to end the utterance **as a release** if the generation is still live (capture could not
+   survive a device change, §6.5), so everything said before the change is still delivered,
+   and to show the message afterwards.
 6. State `.listening`; play the start sound if `Settings.shared.soundEnabled`. Start the
    **consume task** on the main actor: `for try await snapshot in stream { transcript =
    snapshot.text }`; if the stream throws, log and terminate with `.failed(message)`. Also
@@ -547,10 +547,9 @@ it (below).
      `finalizeAndFinishThroughEndOfInput`) can never wedge the utterance in `.finishing`.
      `.tapped` / `.failed` / `.aborted` → `await engine.cancel()`.
   4. Await the consume task (it ends when the stream finishes).
-  5. `.released`: log the hold's peak meter level and voiced-block count, then: a blank
-     transcript fires no callback; a non-blank transcript that never reached speech level
-     (the **speech gate**, below) is discarded silently regardless of how finish ended;
-     otherwise deliver `onFinalTranscript?(raw, utterance)`, bounded by `deliveryTimeout`: if
+  5. `.released`: log the hold's peak meter level, then: a blank transcript fires no
+     callback; a transcript made only of hesitation sounds (**filler-only**, below) is
+     discarded; otherwise deliver `onFinalTranscript?(raw, utterance)`, bounded by `deliveryTimeout`: if
      delivery (formatting + injection) does not finish in time the controller stops waiting
      and proceeds to idle, so a hung pipeline or AX injection cannot wedge `.finishing` (the
      one state the Stop button cannot rescue); the in-flight delivery is left running rather
@@ -562,20 +561,26 @@ it (below).
      (`transcriptionTimedOutMessage`, "Transcription took too long; nothing was typed. Try
      again."); the finish timed out but a transcript was still delivered
      (`transcriptionIncompleteMessage`, "Transcription took too long; the end may be
-     missing."); or delivery itself returned a message because the pipeline recorded the text
-     without typing it (§6.8). Either error auto-returns to `.idle` after
+     missing."); delivery itself returned a message because the pipeline recorded the text
+     without typing it (§6.8); or capture was interrupted (`microphoneChangedMessage`). Any
+     of these auto-returns to `.idle` after
      `errorDisplayDuration` unless the state has changed since.
 
-**Speech gate.** `SpeechGate(voicedLevel:minimumVoicedBlocks:)` decides whether a hold
-contains speech from the per-block meter levels capture reports: `applyLevel` tracks the
-loudest level seen on the session (`peakLevel`) and counts blocks at or above `voicedLevel`
-(`voicedBlocks`); the hold passes only once `voicedBlocks` reaches `minimumVoicedBlocks`. It
-exists because Parakeet transcribes a silent hold as filler ("Mm-.", "And then.") that used
-to get typed regardless. `.disabled` (level 0, 0 blocks) passes everything and is the
-controller's default, used by tests that never emit levels; `AppComposition` wires
-`.standard` (0.3, about −35 dBFS RMS — well above a quiet room, below soft speech at laptop
-distance — and 2 blocks, about 85 ms at 48 kHz, shorter than any spoken word), so a single
-loud block such as a key click or a bump still does not count as speech.
+**Filler-only transcripts.** Parakeet transcribes a silent hold as a hesitation sound
+("Mm-.", "Hmm.") that used to get typed. `FillerOnly.matches` (`SottoText`) is true when a
+transcript has at least one word and every word — split on whitespace and hyphens,
+punctuation dropped — is `m`, `mm`, `mmm`… or one of `hmm hm mhm uh um erm uhm er ah eh`
+(stretched forms such as "hmmm" count). Such a transcript is discarded at step 5; any real
+word keeps it. Loudness cannot make this decision: on a laptop microphone in a normal room a
+quiet one-word answer peaks no higher on the meter than a silent hold's background noise
+(measured 0.21–0.35 against 0.21–0.27), so a level threshold either misses silent holds or
+swallows short words.
+
+**Press while ending**: a press that arrives while the session is terminating (the user
+presses again during "Transcribing…", or a recovered lost release is followed at once by
+its press, §6.4) is **queued**, not dropped: it starts as soon as the terminal task returns
+the controller to idle or error. A release matching the queued press (or the Stop button)
+before then drops it instead.
 
 **Release**: the hotkey's key-up calls `release(onlyFrom: .hotkey)`, which runs
 `terminate(reason: .released)` only if the live session was also started by the hotkey; a
@@ -601,7 +606,8 @@ as its own test:
   a fresh generation whose engine is a different instance and whose transcript is untouched
   by the old setup resuming.
 - duplicate release (two releases in a row) → one callback.
-- press while `.finishing` → ignored.
+- press while `.finishing` → queued: a new utterance starts once the old one reaches idle;
+  a press and release both inside `.finishing` → dropped, no new utterance.
 - engine `start()` throws → `.error`, then `.idle` after the display duration, no callback.
 - snapshot stream throws during listening → `.error`, capture stopped, no callback.
 - microphone denied → `.error` with the message, no engine created.
@@ -623,14 +629,12 @@ as its own test:
   after which the controller reaches `.idle` without waiting (no `.finishing` wedge).
 - stale level callback (from the previous generation) does not change `level`.
 - `.button` source is passed through to the callback.
-- a hold whose peak level never reaches the speech gate's `voicedLevel`, or reaches it for
-  fewer than `minimumVoicedBlocks` blocks (including exactly one loud block), is discarded:
-  no callback fires even though the engine transcribed something.
-- a hold that clears the speech gate delivers its transcript normally.
+- a filler-only transcript ("Mm-.") is discarded: no callback fires.
+- a quiet one-word transcript ("Yes.") with low meter levels throughout is delivered.
 - a hotkey release does not end a utterance the Record button started; `stopButtonRecording`
   still ends it.
 - a capture interruption (a device change `AudioCapture` could not survive, §6.5) ends a
-  live utterance as `.failed` with its message.
+  live utterance as a release: the transcript is delivered, then its message is shown.
 - a message returned by `onFinalTranscript` (the pipeline recorded the text but did not type
   it) is shown as the ending error, then the controller returns to `.idle`.
 
@@ -686,14 +690,15 @@ Log the count of corrections applied and the character count injected or recorde
    `kAXNumberOfCharactersAttribute` before the write; set the selected text to `text`. The
    write can report success and still drop the text (Electron, Chrome, most terminals do),
    and some apps (Firefox) apply it at once but report the new selection only 10–20 ms
-   later, so **poll for up to 150 ms** rather than checking once: trust the write only once
-   the selection's end lands within a tolerance of where the inserted text should put it, or
-   the character count changes by the length the write should have added or removed,
-   whichever appears first. The tolerance (2 UTF-16 units, or a tenth of the inserted length
-   for a long insertion) absorbs autocorrect and newline normalisation without accepting a
-   change of some other size — a field that changes on its own (streamed terminal output, a
-   collaborator's edit) no longer counts as a landed write, where any movement used to. No
-   evidence inside the timeout falls back to the pasteboard.
+   later, so **poll for up to 150 ms** rather than checking once. `ExpectedWrite` decides
+   what counts: the selection changed and its end now lies past where the write started but
+   no further than twice the inserted length (plus a tolerance of 2 UTF-16 units or a tenth
+   of the insertion), or the character count changed by the inserted length less what it
+   replaced, within the inserted length plus that tolerance. The wide band is deliberate:
+   editors that convert on insert (markdown, emoji shortcodes, autocorrect) change the
+   landed length, and treating their write as failed pastes it a second time. A backwards
+   move or a far jump (a terminal printing a screenful) is someone else's change and does
+   not count. No evidence inside the timeout falls back to the pasteboard.
 2. **Pasteboard + ⌘V.** Add one leading space to `text` only when the previous injection
    was Sotto's own, into the same frontmost application, within eight seconds, and did not
    end in whitespace; otherwise paste `text` unchanged (the paste path cannot read the
