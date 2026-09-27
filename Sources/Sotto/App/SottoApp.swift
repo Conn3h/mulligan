@@ -78,7 +78,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if Settings.shared.speechEngine == .parakeet {
             ParakeetModels.shared.prepare()
         }
-        composition.capture.prepareEngine()
         if composition.controller.activate() {
             Log.app.info("hotkey active")
         } else {

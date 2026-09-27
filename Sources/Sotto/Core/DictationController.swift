@@ -381,6 +381,11 @@ final class DictationController {
                     Task { @MainActor in
                         self?.applyLevel(value, generation: generation)
                     }
+                },
+                onInterruption: { [weak self] message in
+                    Task { @MainActor in
+                        self?.captureInterrupted(message, generation: generation)
+                    }
                 }
             )
         } catch {
@@ -445,6 +450,17 @@ final class DictationController {
             )
             terminate(session, reason: .failed(error.localizedDescription))
         }
+    }
+
+    /// Capture stopped under a live utterance (the input device changed and could not be
+    /// restarted). End it with the message rather than keep "listening" to nothing.
+    private func captureInterrupted(_ message: String, generation: Int) {
+        guard let session, session.id == generation, !session.isTerminating else {
+            Log.audio.debug("capture interruption for a finished utterance ignored")
+            return
+        }
+        Log.audio.error("utterance \(session.id, privacy: .public) capture interrupted: \(message, privacy: .public)")
+        terminate(session, reason: .failed(message))
     }
 
     private func applyLevel(_ value: Float, generation: Int) {

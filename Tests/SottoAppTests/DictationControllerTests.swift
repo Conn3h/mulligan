@@ -606,6 +606,20 @@ struct DictationControllerTests {
         #expect(harness.received.isEmpty)
     }
 
+    @Test func captureInterruptionEndsTheUtteranceWithItsMessage() async throws {
+        let engine = FakeEngine(.init(finalText: "never delivered"))
+        let harness = Harness(engines: [engine], errorDisplayDuration: .milliseconds(100))
+        harness.controller.activate()
+        try await harness.pressAndListen()
+
+        #expect(harness.capture.emitInterruption("The microphone changed."))
+        try await settle("error") { harness.state == .error("The microphone changed.") }
+        #expect(harness.received.isEmpty)
+        #expect(await engine.cancelCalls == 1)
+        try await settle("idle after the error") { harness.state == .idle }
+        #expect(harness.controller.liveTaskCount == 0)
+    }
+
     // MARK: Sources
 
     @Test func hotkeyReleaseDoesNotEndAButtonRecording() async throws {

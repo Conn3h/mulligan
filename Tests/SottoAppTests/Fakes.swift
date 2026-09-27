@@ -133,6 +133,7 @@ final class FakeCapture: AudioCapturing {
         let format: AVAudioFormat
         let onBuffer: @Sendable (AudioChunk) -> Void
         let onLevel: @Sendable (Float) -> Void
+        let onInterruption: @Sendable (String) -> Void
     }
 
     private struct State: Sendable {
@@ -156,7 +157,8 @@ final class FakeCapture: AudioCapturing {
     func start(
         outputFormat: AVAudioFormat,
         onBuffer: @escaping @Sendable (AudioChunk) -> Void,
-        onLevel: @escaping @Sendable (Float) -> Void
+        onLevel: @escaping @Sendable (Float) -> Void,
+        onInterruption: @escaping @Sendable (String) -> Void
     ) throws {
         try state.withLock { state in
             state.startCalls += 1
@@ -164,7 +166,9 @@ final class FakeCapture: AudioCapturing {
                 state.startError = nil
                 throw error
             }
-            let session = Session(format: outputFormat, onBuffer: onBuffer, onLevel: onLevel)
+            let session = Session(
+                format: outputFormat, onBuffer: onBuffer, onLevel: onLevel, onInterruption: onInterruption
+            )
             state.previous = state.current ?? state.previous
             state.current = session
         }
@@ -192,6 +196,17 @@ final class FakeCapture: AudioCapturing {
         }
         buffer.frameLength = frameLength
         session.onBuffer(AudioChunk(buffer: buffer))
+        return true
+    }
+
+    /// Reports that capture could not survive a device change, as the real capture does
+    /// after a failed restart. Returns false when nothing is capturing.
+    @discardableResult
+    func emitInterruption(_ message: String) -> Bool {
+        guard let session = state.withLock({ $0.current }) else {
+            return false
+        }
+        session.onInterruption(message)
         return true
     }
 

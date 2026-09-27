@@ -9,7 +9,8 @@ protocol AudioCapturing: AnyObject, Sendable {
     func start(
         outputFormat: AVAudioFormat,
         onBuffer: @escaping @Sendable (AudioChunk) -> Void,
-        onLevel: @escaping @Sendable (Float) -> Void
+        onLevel: @escaping @Sendable (Float) -> Void,
+        onInterruption: @escaping @Sendable (String) -> Void
     ) throws
     func stop()
 }
@@ -31,7 +32,7 @@ enum AudioCaptureError: LocalizedError {
 /// `AVAudioEngine` input tap in the node's native format, converted to the engine's format
 /// when they differ. Nothing mutable is shared with the audio thread: `start()` builds one
 /// immutable `Session` that the tap closure captures, and the class itself only holds the
-/// engine and a running flag behind a lock that the caller's thread takes.
+/// running engine and its callbacks behind a lock.
 final class AudioCapture: AudioCapturing {
     private static let tapFrameCount: AVAudioFrameCount = 2048
     /// Extra output frames beyond frames x rate ratio, so a resampler's rounding never
@@ -61,93 +62,174 @@ final class AudioCapture: AudioCapturing {
         }
     }
 
-    private struct Storage {
-        var engine: AVAudioEngine?
-        var isRunning = false
+    /// What a running capture needs to rebuild itself on a new input device.
+    private struct Running {
+        let engine: AVAudioEngine
+        let outputFormat: AVAudioFormat
+        let onBuffer: @Sendable (AudioChunk) -> Void
+        let onLevel: @Sendable (Float) -> Void
+        let onInterruption: @Sendable (String) -> Void
+        let observer: NSObjectProtocol
     }
 
+    private struct Storage {
+        var running: Running?
+    }
+
+    static let microphoneChangedMessage = "The microphone changed and could not be restarted. Try again."
+
     private let storage = Mutex(Storage())
+    /// Configuration-change notifications are delivered here, asynchronously, so a change
+    /// posted while `start` or a restart holds the lock can never deadlock on it.
+    private let notificationQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        queue.name = "com.conn3h.sotto.audio-configuration"
+        return queue
+    }()
 
     init() {}
 
+    /// Builds a fresh `AVAudioEngine` for every start. A cached engine kept the input device
+    /// and format it first saw: after AirPods connected or the input changed between holds it
+    /// could hand the tap a stale format, and one failed start poisoned every later press
+    /// until relaunch. A new engine costs a few milliseconds (logged).
     func start(
         outputFormat: AVAudioFormat,
         onBuffer: @escaping @Sendable (AudioChunk) -> Void,
-        onLevel: @escaping @Sendable (Float) -> Void
+        onLevel: @escaping @Sendable (Float) -> Void,
+        onInterruption: @escaping @Sendable (String) -> Void
     ) throws {
         try storage.withLock { storage in
-            if storage.isRunning {
+            if storage.running != nil {
                 Log.audio.info("capture start ignored: already running")
                 return
             }
-            let engine = storage.engine ?? AVAudioEngine()
-            let input = engine.inputNode
-            let native = input.outputFormat(forBus: 0)
-            guard native.sampleRate > 0, native.channelCount > 0 else {
-                Log.audio.error("capture start failed: input node reports no usable format")
-                throw AudioCaptureError.noInputDevice
-            }
-            let needsConversion = native != outputFormat
-            var converter: AVAudioConverter?
-            if needsConversion {
-                guard let made = AVAudioConverter(from: native, to: outputFormat) else {
-                    Log.audio.error(
-                        "capture start failed: no converter from \(native.description, privacy: .public) to \(outputFormat.description, privacy: .public)"
-                    )
-                    throw AudioCaptureError.converterUnavailable(
-                        from: native.description, to: outputFormat.description
-                    )
-                }
-                converter = made
-            }
-            if native.commonFormat != .pcmFormatFloat32 {
-                Log.audio.error(
-                    "native input format is not Float32 (\(native.commonFormat.rawValue, privacy: .public)); the level meter will stay at zero"
-                )
-            }
-            let session = Session(
-                converter: converter, outputFormat: outputFormat, onBuffer: onBuffer, onLevel: onLevel
+            let clock = ContinuousClock()
+            let started = clock.now
+            let engine = AVAudioEngine()
+            let native = try Self.installTap(
+                on: engine, outputFormat: outputFormat, onBuffer: onBuffer, onLevel: onLevel
             )
-            input.installTap(onBus: 0, bufferSize: Self.tapFrameCount, format: native) { buffer, _ in
-                session.process(buffer)
-            }
             engine.prepare()
             do {
                 try engine.start()
             } catch {
-                input.removeTap(onBus: 0)
+                engine.inputNode.removeTap(onBus: 0)
                 Log.audio.error("audio engine start failed: \(error.localizedDescription, privacy: .public)")
                 throw error
             }
-            storage.engine = engine
-            storage.isRunning = true
+            // The engine stops itself when its I/O configuration changes (a device connects
+            // or disconnects, a Bluetooth headset switches profile). Without this the tap
+            // went silent while the utterance kept "listening".
+            let engineID = ObjectIdentifier(engine)
+            let observer = NotificationCenter.default.addObserver(
+                forName: .AVAudioEngineConfigurationChange, object: engine, queue: notificationQueue
+            ) { [weak self] _ in
+                self?.handleConfigurationChange(of: engineID)
+            }
+            storage.running = Running(
+                engine: engine,
+                outputFormat: outputFormat,
+                onBuffer: onBuffer,
+                onLevel: onLevel,
+                onInterruption: onInterruption,
+                observer: observer
+            )
             Log.audio.info(
-                "capture start: native \(native.sampleRate, privacy: .public) Hz x\(native.channelCount, privacy: .public) -> engine \(outputFormat.sampleRate, privacy: .public) Hz x\(outputFormat.channelCount, privacy: .public), converting: \(needsConversion, privacy: .public)"
+                "capture start: native \(native.sampleRate, privacy: .public) Hz x\(native.channelCount, privacy: .public) -> engine \(outputFormat.sampleRate, privacy: .public) Hz x\(outputFormat.channelCount, privacy: .public), converting: \(native != outputFormat, privacy: .public), took \(clock.now - started, privacy: .public)"
             )
         }
     }
 
     func stop() {
         storage.withLock { storage in
-            guard storage.isRunning, let engine = storage.engine else {
+            guard let running = storage.running else {
                 return
             }
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
-            storage.isRunning = false
+            NotificationCenter.default.removeObserver(running.observer)
+            running.engine.inputNode.removeTap(onBus: 0)
+            running.engine.stop()
+            storage.running = nil
             Log.audio.info("capture stop")
         }
     }
 
-    /// Pre-allocates the reusable engine so the first hold does not pay allocation. The
-    /// per-start `prepare()` still runs in `start()` after the tap is installed. Idempotent;
-    /// safe to call at launch.
-    func prepareEngine() {
-        storage.withLock { storage in
-            guard storage.engine == nil else { return }
-            storage.engine = AVAudioEngine()
-            Log.audio.info("audio engine pre-allocated")
+    /// Re-installs the tap for the new input format and restarts the engine, so a device
+    /// change mid-hold costs a moment of audio rather than the rest of the utterance. If that
+    /// fails, the utterance is told, so it ends with an error instead of listening to silence.
+    private func handleConfigurationChange(of engineID: ObjectIdentifier) {
+        let notify: (@Sendable (String) -> Void)? = storage.withLock { storage in
+            guard let running = storage.running, ObjectIdentifier(running.engine) == engineID else {
+                Log.audio.debug("audio configuration change for a stopped capture ignored")
+                return nil
+            }
+            let engine = running.engine
+            Log.audio.info("audio configuration changed during capture; restarting on the current input")
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+            do {
+                let native = try Self.installTap(
+                    on: engine, outputFormat: running.outputFormat,
+                    onBuffer: running.onBuffer, onLevel: running.onLevel
+                )
+                engine.prepare()
+                try engine.start()
+                Log.audio.info(
+                    "capture restarted: native \(native.sampleRate, privacy: .public) Hz x\(native.channelCount, privacy: .public)"
+                )
+                return nil
+            } catch {
+                engine.inputNode.removeTap(onBus: 0)
+                NotificationCenter.default.removeObserver(running.observer)
+                storage.running = nil
+                Log.audio.error(
+                    "capture restart after a configuration change failed: \(error.localizedDescription, privacy: .public)"
+                )
+                return running.onInterruption
+            }
         }
+        notify?(Self.microphoneChangedMessage)
+    }
+
+    /// Installs the tap in the input node's current native format, converting to
+    /// `outputFormat` when they differ. Returns the native format.
+    private static func installTap(
+        on engine: AVAudioEngine,
+        outputFormat: AVAudioFormat,
+        onBuffer: @escaping @Sendable (AudioChunk) -> Void,
+        onLevel: @escaping @Sendable (Float) -> Void
+    ) throws -> AVAudioFormat {
+        let input = engine.inputNode
+        let native = input.outputFormat(forBus: 0)
+        guard native.sampleRate > 0, native.channelCount > 0 else {
+            Log.audio.error("capture start failed: input node reports no usable format")
+            throw AudioCaptureError.noInputDevice
+        }
+        var converter: AVAudioConverter?
+        if native != outputFormat {
+            guard let made = AVAudioConverter(from: native, to: outputFormat) else {
+                Log.audio.error(
+                    "capture start failed: no converter from \(native.description, privacy: .public) to \(outputFormat.description, privacy: .public)"
+                )
+                throw AudioCaptureError.converterUnavailable(
+                    from: native.description, to: outputFormat.description
+                )
+            }
+            converter = made
+        }
+        if native.commonFormat != .pcmFormatFloat32 {
+            Log.audio.error(
+                "native input format is not Float32 (\(native.commonFormat.rawValue, privacy: .public)); the level meter will stay at zero"
+            )
+        }
+        let session = Session(
+            converter: converter, outputFormat: outputFormat, onBuffer: onBuffer, onLevel: onLevel
+        )
+        input.installTap(onBus: 0, bufferSize: tapFrameCount, format: native) { buffer, _ in
+            session.process(buffer)
+        }
+        return native
     }
 
     // MARK: Buffer handling (audio thread)
