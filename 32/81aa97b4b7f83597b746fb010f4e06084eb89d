@@ -1,0 +1,32 @@
+Sources/Sotto/Core/MutationLane.swift
+  s_54db94c607acba::t_18600b8009ca33 1-21
+Tests/SottoAppTests/MutationLaneTests.swift
+  s_54db94c607acba::t_18600b8009ca33 1-72
+Sources/Sotto/Core/TextInjector.swift
+  s_54db94c607acba::t_c65425bbc2e3a0 14-16,48,51-75,83-90,93-109,114-174,195-201,207,216,223,226,230,237,242,247,252-253,326,336,432-433,442,452,462,467,470,476,584-586,600-606
+  s_54db94c607acba::t_3698486fecfa50 607-609
+Sources/Sotto/Core/UtterancePipeline.swift
+  s_54db94c607acba::t_c65425bbc2e3a0 28,41,55-56,65,72-76
+Tests/SottoAppTests/UtterancePipelineTests.swift
+  s_54db94c607acba::t_c44d9d16705ee9 13-14,48,52-53,60,200-218
+Sources/Sotto/Core/SyntheticEvent.swift
+  s_54db94c607acba::t_18600b8009ca33 1-16
+docs/SPEC.md
+  s_54db94c607acba::t_a5d3ed7f9dccf5 1357-1361,1583-1584
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "3281aa97b4b7f83597b746fb010f4e06084eb89d",
+  "prompts": {},
+  "sessions": {
+    "s_54db94c607acba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e9cec764-c6e0-4aee-98d4-309aa9357e9b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
