@@ -1,5 +1,5 @@
-EXEC     := Sotto
-APPNAME  := Sotto.app
+EXEC     := Mulligan
+APPNAME  := Mulligan.app
 # `build` and `test` stay debug for fast iteration; the shipped bundle is release.
 CONFIG   := debug
 APP_CONFIG := release
@@ -12,10 +12,10 @@ APP_CONFIG := release
 # A linked worktree (`.git` is a file, not a directory) gets its own stage under
 # worktrees/<name>, so parallel builds never share SwiftPM state or clobber each other's
 # bundle. Only the main checkout owns the canonical stage, and only the canonical stage may
-# be launched or installed: every opened copy of Sotto.app registers itself with
+# be launched or installed: every opened copy of Mulligan.app registers itself with
 # LaunchServices under the same bundle id, and while the Accessibility grant is missing
 # each one pops the system prompt.
-CANONICAL_STAGE := $(HOME)/Library/Caches/SottoBuild
+CANONICAL_STAGE := $(HOME)/Library/Caches/MulliganBuild
 IS_WORKTREE     := $(shell test -f .git && echo 1)
 ifeq ($(IS_WORKTREE),1)
 STAGE    := $(CANONICAL_STAGE)/worktrees/$(notdir $(CURDIR))
@@ -28,6 +28,9 @@ APP_BUILD  := $(SCRATCH)/$(APP_CONFIG)/$(EXEC)
 BUNDLE     := $(STAGE)/$(APPNAME)
 CONTENTS   := $(BUNDLE)/Contents
 INSTALLED  := /Applications/$(APPNAME)
+# The app was called Sotto until 0.2.1. Same bundle id, so a leftover copy would register
+# alongside the new one and could take the push-to-talk key: install removes it.
+LEGACY_INSTALLED := /Applications/Sotto.app
 LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 # TCC keys the Accessibility and Microphone grants to the code signature. An ad-hoc
@@ -42,9 +45,10 @@ SIGN_ID := $(shell security find-identity -v -p codesigning 2>/dev/null \
 # bundle never disagree. NOTARY_PROFILE names the keychain item created once with
 # `xcrun notarytool store-credentials`; see the `notary-profile` target.
 VERSION        := $(shell /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
+# The keychain item predates the rename to Mulligan and keeps its name.
 NOTARY_PROFILE ?= sotto-notary
 DIST           := $(STAGE)/dist
-ZIP            := $(DIST)/Sotto-$(VERSION).zip
+ZIP            := $(DIST)/Mulligan-$(VERSION).zip
 
 .PHONY: all build test app run install clean icon signing-identity launchable \
         notary-profile notarize release
@@ -99,6 +103,12 @@ run: launchable app
 # registered, which is the normal case after a plain `make app`, hence the `|| true`.
 install: launchable app
 	@pkill -x $(EXEC) 2>/dev/null || true
+	@pkill -x Sotto 2>/dev/null || true
+	@if [ -d "$(LEGACY_INSTALLED)" ]; then \
+	    "$(LSREGISTER)" -u "$(LEGACY_INSTALLED)" >/dev/null 2>&1 || true; \
+	    rm -rf "$(LEGACY_INSTALLED)"; \
+	    echo "removed the old $(LEGACY_INSTALLED)"; \
+	fi
 	@rm -rf "$(INSTALLED)"
 	@cp -R "$(BUNDLE)" "$(INSTALLED)"
 	@"$(LSREGISTER)" -u "$(BUNDLE)" >/dev/null 2>&1 || true
@@ -159,9 +169,9 @@ release: notarize
 	    echo "error: working tree is not clean; commit or stash before releasing." >&2; \
 	    exit 1; \
 	fi
-	@git tag -a "v$(VERSION)" -m "Sotto $(VERSION)"
+	@git tag -a "v$(VERSION)" -m "Mulligan $(VERSION)"
 	@git push origin "v$(VERSION)"
-	@gh release create "v$(VERSION)" "$(ZIP)" --title "Sotto $(VERSION)" --generate-notes
+	@gh release create "v$(VERSION)" "$(ZIP)" --title "Mulligan $(VERSION)" --generate-notes
 	@echo "published v$(VERSION)"
 
 # From the main checkout this also removes every worktree stage under $(STAGE)/worktrees.

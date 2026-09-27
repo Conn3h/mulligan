@@ -1,10 +1,11 @@
-# Sotto
+# Mulligan
 
-> **sotto voce** *(adverb, Italian: "under the voice")* — in a quiet voice, as if not to be overheard.
+> **mulligan** *(noun, golf)* — a free second shot, taken as if the first never happened.
 
-Hold a key, say it under your breath, let go. Sotto writes it where you were typing.
+Hold a key, talk, let go: Mulligan writes it where you were typing. Said it wrong? Tap one more
+key while you are still holding, and it takes the text back so you can say it again.
 
-![Sotto: hold a key, talk, release, and the text lands in the Claude Code prompt](docs/media/demo.gif)
+![Mulligan: hold a key, talk, release, and the text lands in the Claude Code prompt](docs/media/demo.gif)
 
 Push-to-talk dictation for macOS. Hold a key, talk, release, and cleaned-up text lands in
 whatever text field has focus: a terminal, an editor, a chat box, a prompt for a coding
@@ -14,15 +15,15 @@ personal dictionary for the names and jargon speech models get wrong, and local 
 No accounts, no network, no subscription.
 
 Built for talking to Claude Code, Codex and the like all day without typing, but it works in
-any app that takes text. If you have used Wispr Flow or Superwhisper, Sotto is the same
+any app that takes text. If you have used Wispr Flow or Superwhisper, Mulligan is the same
 hold-to-talk idea, but open source, fully on-device and free.
 
 Requires macOS 26.
 
 ## Install
 
-Download the latest `Sotto-x.y.z.zip` from [Releases](https://github.com/Conn3h/sotto/releases),
-unzip it and drag `Sotto.app` to Applications. The build is signed and notarised, so it opens
+Download the latest `Mulligan-x.y.z.zip` (releases before 0.2.1 are called Sotto) from [Releases](https://github.com/Conn3h/mulligan/releases),
+unzip it and drag `Mulligan.app` to Applications. The build is signed and notarised, so it opens
 without warnings.
 
 Or build it yourself (needs Xcode 26):
@@ -38,10 +39,10 @@ Then grant two permissions, neither of which can be requested silently:
 | Accessibility | System Settings > Privacy & Security > Accessibility | Seeing the push-to-talk key and inserting text |
 | Microphone | Prompted on first dictation | Audio capture |
 
-Sotto notices the Accessibility grant on its own; no restart needed. Then hold
+Mulligan notices the Accessibility grant on its own; no restart needed. Then hold
 **Right Option** and talk.
 
-Said it wrong? Keep holding **Right Option** and tap **Right Command**: Sotto removes what it
+Said it wrong? Keep holding **Right Option** and tap **Right Command**: Mulligan removes what it
 just typed and listens again, so you simply say it again. It only erases text it can show is
 still its own, and tells you why when it refuses. Both keys can be changed in Settings.
 
@@ -54,7 +55,7 @@ refuses to sign ad-hoc, because an ad-hoc signature changes on every build and m
 the Accessibility grant each time. If you have no Developer ID, `make app SIGN_ID=-`
 produces a throwaway build; expect to re-grant Accessibility after each rebuild.
 
-The library targets (`SottoText`, `SottoDictionary`) are tested first and `docs/SPEC.md` is
+The library targets (`MulliganText`, `MulliganDictionary`) are tested first and `docs/SPEC.md` is
 the contract every module is written against. Contributions are welcome; keep to the spec,
 or change the spec in the same change. There is no CI; run `make test` locally.
 

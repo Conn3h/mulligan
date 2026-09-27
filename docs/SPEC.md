@@ -1,4 +1,4 @@
-# Sotto — v1 specification (v1.1, after external review)
+# Mulligan — v1 specification (v1.1, after external review)
 
 Push-to-talk dictation for macOS, entirely on-device. Hold a key, talk, release, and
 cleaned-up text lands in whatever text field has focus. Native Swift 6, SwiftUI, Apple's
@@ -14,7 +14,12 @@ per-utterance generations, single-flight termination, and injectable dependencie
 v1.2 (2026-09-02) records the implementation deviations accepted from batches A and B,
 marked "as built" below; v1.3 (2026-09-27) adds erase last dictation (§6.16), a
 configurable erase key, and keeps context corrections out of Parakeet's bias list (§6.6a),
-revised the same day after two reviews (`docs/reviews/2026-09-27-erase-spec-*.md`).
+revised the same day after two reviews (`docs/reviews/2026-09-27-erase-spec-*.md`); v1.4
+(2026-09-28) renames the app from Sotto to Mulligan. Everything the user or the system has
+already stored keeps the old name so nothing is lost: the bundle id and log subsystem
+`com.conn3h.sotto` (the Accessibility and Microphone grants and `UserDefaults` hang on it),
+`~/Library/Application Support/Sotto/`, and the `sotto-notary` keychain profile.
+`make install` removes a leftover `/Applications/Sotto.app`, which shares the bundle id.
 
 ---
 
@@ -39,7 +44,7 @@ file-watching of the dictionary (see §6.12).
 
 ## 3. Clean-room rule
 
-Sotto is written from this spec. **Do not read, search, or copy code from any other
+Mulligan is written from this spec. **Do not read, search, or copy code from any other
 dictation project**, including anything elsewhere on this machine. The spec was written by
 someone who studied prior art; the implementation is written by someone who has not. Test
 vectors, prompts, and copy are authored fresh. If the spec is ambiguous, choose the simplest
@@ -91,14 +96,14 @@ Invariants that the whole design rests on:
 ```
 Package.swift                 tools 6.2, macOS 26, three targets + three test targets
 Makefile                      build / test / app / run / install / clean (see §7)
-Resources/                    Info.plist, Sotto.entitlements, AppIcon.icns (later)
+Resources/                    Info.plist, Mulligan.entitlements, AppIcon.icns (later)
 Sources/
-  SottoText/                  Foundation-only. TextFormatter, RuleBasedFormatter,
+  MulliganText/                  Foundation-only. TextFormatter, RuleBasedFormatter,
                               PassthroughFormatter, CleanupGuard.
-  SottoDictionary/            Foundation-only. DictionaryEntry, DictionaryFile,
+  MulliganDictionary/            Foundation-only. DictionaryEntry, DictionaryFile,
                               DictionaryCorrector, AppliedCorrection, DictionaryWarning.
-  Sotto/
-    App/                      SottoApp.swift (scenes, AppDelegate), AppComposition.swift
+  Mulligan/
+    App/                      MulliganApp.swift (scenes, AppDelegate), AppComposition.swift
     Core/                     DictationController, HotkeyMonitor, AudioCapture, TextInjector,
                               UtterancePipeline
     Speech/                   TranscriptionEngine (protocol, AudioChunk, TranscriptSnapshot),
@@ -111,22 +116,22 @@ Sources/
                               Components
     Support/                  Log, Settings, Permissions
 Tests/
-  SottoTextTests/
-  SottoDictionaryTests/       vectors.json is authored by the orchestrator (an oracle)
-  SottoAppTests/              controller state machine and cleanup timeout, with fakes
+  MulliganTextTests/
+  MulliganDictionaryTests/       vectors.json is authored by the orchestrator (an oracle)
+  MulliganAppTests/              controller state machine and cleanup timeout, with fakes
 docs/SPEC.md                  this file
 docs/reviews/                 external review transcripts
 ```
 
-Identifiers: app name **Sotto**, executable `Sotto`, bundle id `com.conn3h.sotto`, log
+Identifiers: app name **Mulligan**, executable `Mulligan`, bundle id `com.conn3h.sotto`, log
 subsystem `com.conn3h.sotto`, Application Support directory
-`~/Library/Application Support/Sotto/` holding `dictionary.txt` and `history.jsonl`.
+`~/Library/Application Support/Sotto/` (the pre-rename name, kept) holding `dictionary.txt` and `history.jsonl`.
 
 ## 6. Module specifications
 
 Types are Swift 6 language mode, strict concurrency. `@MainActor` where stated. Public API
 of the two library targets is `public`; everything in the app target is internal (the app
-test target uses `@testable import Sotto`).
+test target uses `@testable import Mulligan`).
 
 ### 6.1 Logging — `Support/Log.swift` (exists)
 
@@ -235,7 +240,7 @@ Behaviour:
   stops or reloads the monitor (§6.7).
 
 The tap needs Accessibility and real events, so `handle(type:keyCode:flags:)` is internal
-and the key-state probe is injectable, and `Tests/SottoAppTests/HotkeyMonitorTests.swift`
+and the key-state probe is injectable, and `Tests/MulliganAppTests/HotkeyMonitorTests.swift`
 drives `handle` with plain values and a fake probe to cover: a key-up lost while the tap was
 disabled is reconciled into a release on re-enable; no spurious release fires when the key is
 still physically held across a tap flap; a second down for our key with no tap-disabled
@@ -402,7 +407,7 @@ A second engine behind the same seam, for side-by-side accuracy testing against 
 is the one third-party dependency: `FluidAudio` (SwiftPM, statically linked, `traits: []`
 so the NeMo text-normalisation xcframework is not pulled in), which ships NVIDIA
 Parakeet TDT 0.6B as CoreML. FluidAudio's own resource bundle is only read by its TTS code,
-which Sotto never calls, so `make app` does not copy it.
+which Mulligan never calls, so `make app` does not copy it.
 
 ```swift
 enum SpeechEngineChoice: String, CaseIterable, Sendable { case apple, parakeet }
@@ -458,7 +463,7 @@ Behaviour:
   from an ordinary word ("code" to Codex is 0.80); each such term (six characters or fewer,
   no space or hyphen) gets a per-term `minSimilarity` of 0.85 instead — above the 0.83 that
   one edit costs a six-character word — from `BiasStrictness.minimumSimilarity(for:)`
-  (`SottoDictionary`), so it only replaces a spelling that is nearly exact. The rescorer runs
+  (`MulliganDictionary`), so it only replaces a spelling that is nearly exact. The rescorer runs
   with `spotterRescueEnabled: false`: the acoustic rescue replaces correctly heard words with
   unspoken dictionary terms (a "Kubernetes" entry swallowed "the quick brown fox" in
   testing), and the library's own benchmarks show turning it off cuts false positives roughly
@@ -612,7 +617,7 @@ it (below).
      `errorDisplayDuration` unless the state has changed since.
 
 **Filler-only transcripts.** Parakeet transcribes a silent hold as a hesitation sound
-("Mm-.", "Hmm.") that used to get typed. `FillerOnly.matches` (`SottoText`) is true when a
+("Mm-.", "Hmm.") that used to get typed. `FillerOnly.matches` (`MulliganText`) is true when a
 transcript has at least one word and every word — split on whitespace and hyphens, with
 surrounding punctuation trimmed — is `m`, `mm`, `mmm`… or one of `hmm hm mhm uh um erm uhm er ah eh`
 (stretched forms such as "hmmm" count). A word holding a digit or symbol ("42", "50%") is
@@ -626,7 +631,7 @@ swallows short words.
 "Okay."), which `FillerOnly` must keep because people say them. For a Parakeet hold of at most
 3 s, the engine keeps the audio and, before yielding the final text, scores it with FluidAudio's
 Silero speech detector (`VadManager`, loaded with the Parakeet models); when no 256 ms window
-reaches `SpeechEvidence.threshold` (0.7, `SottoText`), the final text is empty and nothing is
+reaches `SpeechEvidence.threshold` (0.7, `MulliganText`), the final text is empty and nothing is
 typed. When the start sound is on, the first window is left out whenever later ones exist: it
 holds that sound, which scored 0.94 on one silent hold. With the sound off it counts, so a
 quick word spoken only in the first 256 ms is never dropped (Codex round 4). Measured 2026-09-27 on 18
@@ -654,7 +659,7 @@ to the new monitor); a Record-button session does not depend on the key and keep
 so changing the key in Settings cannot cut it short. Then `hotkey.stop()`, reread the key
 from Settings, `hotkey.start()`.
 
-**Tests** (`Tests/SottoAppTests/DictationControllerTests.swift`, Swift Testing, with a
+**Tests** (`Tests/MulliganAppTests/DictationControllerTests.swift`, Swift Testing, with a
 fake hotkey, a fake capture that records calls and can emit buffers and levels on demand, a
 fake engine whose `start()`/`preferredInputFormat()`/`finish()` can be suspended and
 resumed by the test, and a `requestMicrophone` closure the test controls) must cover, each
@@ -700,7 +705,7 @@ as its own test:
 - a message returned by `onFinalTranscript` (the pipeline recorded the text but did not type
   it) is shown as the ending error, then the controller returns to `.idle`.
 
-`Tests/SottoAppTests/DictationOrderTests.swift` adds the **event-order matrix**: every
+`Tests/MulliganAppTests/DictationOrderTests.swift` adds the **event-order matrix**: every
 external event (hotkey press, release, tap and lost-release recovery, Record, Stop,
 `reloadHotkey()`, `deactivate()`, capture interruption live and stale, snapshot failure, the
 `maxHold` watchdog) in every state (starting at each setup suspension point, listening from
@@ -712,7 +717,7 @@ a finish or delivery timeout then another utterance, a tap then an immediate pre
 cell checks: at most one callback per utterance and none after a cancel, idle with no live
 tasks, capture stopped, every engine ended, and no engine unless a press should start one.
 
-Write these tests first; the fake types live in `Tests/SottoAppTests/Fakes.swift`.
+Write these tests first; the fake types live in `Tests/MulliganAppTests/Fakes.swift`.
 
 ### 6.8 Pipeline and injection — `Core/UtterancePipeline.swift`, `Core/TextInjector.swift`
 
@@ -742,8 +747,8 @@ frontmost at release. The text is not ready to type until after finishing and cl
 hotkey utterance compares it against the frontmost app now, and types only on a match.
 Play the end sound, meaning "the text landed", only when it actually did.
 
-Why the source check: pressing Record in Sotto's own window activates Sotto and focuses
-the button, so the system-wide focused element is Sotto's, not the field the user was
+Why the source check: pressing Record in Mulligan's own window activates Mulligan and focuses
+the button, so the system-wide focused element is Mulligan's, not the field the user was
 writing in. A button-started utterance is therefore recorded to history (where Copy is one
 click away) and never injected. The History panel labels such rows "recorded".
 
@@ -777,7 +782,7 @@ paste, so nothing was typed):
    pastes it a second time. Backwards moves, small changes and far jumps (a terminal
    printing a screenful) are someone else's and do not count. No evidence inside the timeout falls back to the pasteboard.
 2. **Pasteboard + ⌘V.** Add one leading space to `text` only when the previous injection
-   was Sotto's own, into the same frontmost application, within eight seconds, and did not
+   was Mulligan's own, into the same frontmost application, within eight seconds, and did not
    end in whitespace; otherwise paste `text` unchanged (the paste path cannot read the
    target to look at the character before the caret, unlike the accessibility path, so it
    uses this bounded same-app heuristic instead). Save every pasteboard item's data by
@@ -793,7 +798,7 @@ paste, so nothing was typed):
 
 Log which strategy was used and why the AX path was not trusted, with the character count.
 
-### 6.9 SottoText — `Sources/SottoText/`
+### 6.9 MulliganText — `Sources/MulliganText/`
 
 ```swift
 public protocol TextFormatter: Sendable { func format(_ raw: String) async -> String }
@@ -874,7 +879,7 @@ lowercase, then split on any character that is not a letter or digit (so `isn't`
    `here's the cleaned`, `here is the cleaned`, `cleaned transcript`, `sure,`,
    `certainly,`, `i cannot`, `i can't`, `as an ai`. Reason: `assistant preamble`.
 
-Tests (Swift Testing, `Tests/SottoTextTests/`): every row of the table above as its own
+Tests (Swift Testing, `Tests/MulliganTextTests/`): every row of the table above as its own
 test; each formatter rule with a negative case; `PassthroughFormatter` trims only; the
 guard's four rejection paths with the exact reason prefixes; an accepted filler-heavy
 cleanup (`um so like I think we should uh ship it` → `I think we should ship it.` accepted);
@@ -927,13 +932,13 @@ the description and fall back. On success, run `CleanupGuard.evaluate`; on `.rej
 the reason and fall back. A stalled model must never cost the user an utterance they already
 spoke.
 
-Tests (`Tests/SottoAppTests/FoundationModelFormatterTests.swift`) with a fake
+Tests (`Tests/MulliganAppTests/FoundationModelFormatterTests.swift`) with a fake
 `CleanupModel`: unavailable → rules; model throws → rules; model returns an answer → rules
 with the guard's reason; model returns a good cleanup → that cleanup; model never returns
 → rules, and `format` returns within `timeout + 250 ms` measured with `ContinuousClock`
 (use a 200 ms timeout in the test); the late result of a timed-out call does not surface.
 
-### 6.11 SottoDictionary — `Sources/SottoDictionary/`
+### 6.11 MulliganDictionary — `Sources/MulliganDictionary/`
 
 ```swift
 public struct DictionaryEntry: Identifiable, Codable, Hashable, Sendable {
@@ -983,7 +988,7 @@ entry in order, disabled entries as `# off: …`. Round-tripping is **semantic**
 survive parse → serialize → parse with kind, write, hear and enabled intact; ordinary
 comments are discarded by design; ids are not persisted.
 
-**Corrector semantics** (the vectors in `Tests/SottoDictionaryTests/vectors.json` are the
+**Corrector semantics** (the vectors in `Tests/MulliganDictionaryTests/vectors.json` are the
 oracle; they are authored by the orchestrator, not the implementer):
 
 - Only enabled `.correction` entries participate. Terms never match anything.
@@ -1050,7 +1055,7 @@ messages, so the UI and tests agree:
 
 Never blocks. No common-word heuristic in v1.
 
-Tests (`Tests/SottoDictionaryTests/`): a `VectorTests` suite that loads `vectors.json`
+Tests (`Tests/MulliganDictionaryTests/`): a `VectorTests` suite that loads `vectors.json`
 (schema: `[{ "name", "entries": [{ "kind": "term"|"correction", "write", "hear"?,
 "enabled"? }], "input", "expected", "applied": [{ "from", "to", "count" }] }]`) and asserts
 `expected` and `applied` (including order) for every vector, reporting the vector's `name`
@@ -1087,7 +1092,7 @@ the save that caused them, so a store cannot reliably tell its own atomic write 
 external edit. Instead, `reloadFromDisk()` reads the file, and is called on
 `NSApplication.didBecomeActiveNotification`, from a "Reload Dictionary" menu item, and (as
 built) from `AppComposition`'s engine factory on every press: hotkey dictation never brings
-Sotto frontmost, so without this a hand edit to `dictionary.txt` would only reach a hold
+Mulligan frontmost, so without this a hand edit to `dictionary.txt` would only reach a hold
 started some other way. A reload skips work when the file's modification date and size
 match the last load or save, so the per-press call costs a stat when nothing changed.
 When entries are re-parsed, **existing ids are preserved** for entries whose `(kind, hear,
@@ -1136,7 +1141,7 @@ share `Support/AppSupportDirectory.swift` for the directory (as built).
 
 ### 6.14 UI
 
-**Design direction: "quiet instrument".** Sotto is a tool you glance at, not a toy. Matte
+**Design direction: "quiet instrument".** Mulligan is a tool you glance at, not a toy. Matte
 surfaces, one accent, generous whitespace, tabular numerals for timings. In light
 appearance: warm off-white panels on a slightly darker ground with ink-black text. In dark
 appearance: near-black panels on true black with off-white text. Two rules that are not
@@ -1207,10 +1212,10 @@ has its own `Settings` type.
 
 **Menu bar** — `UI/MenuBarContent.swift`: icon `waveform` / `waveform.circle.fill` when
 active; "Hold ⟨key⟩ to dictate"; unless the erase key is off, a second disabled line
-"⟨key⟩ + ⟨erase key⟩ erases the last one"; Open Sotto; Settings…; Grant Accessibility… / Grant
+"⟨key⟩ + ⟨erase key⟩ erases the last one"; Open Mulligan; Settings…; Grant Accessibility… / Grant
 Microphone… when missing; Quit.
 
-### 6.15 App lifecycle — `App/SottoApp.swift`, `App/AppComposition.swift`
+### 6.15 App lifecycle — `App/MulliganApp.swift`, `App/AppComposition.swift`
 
 ```swift
 /// The composition root. Exactly one instance for the life of the process, owned by the
@@ -1249,12 +1254,12 @@ Reviewed 2026-09-27 by Codex and an independent reviewer
 
 **What the user does.** Hold the push-to-talk key and tap the erase key: by default the other
 right-hand modifier, Right ⌘ next to Right ⌥, so the whole gesture stays under one hand. The
-text Sotto last typed disappears, the start sound plays, and Sotto is listening again, so the
+text Mulligan last typed disappears, the start sound plays, and Mulligan is listening again, so the
 user keeps holding and says it again. Releasing right after the tap only erases. Whatever was
 said in the same hold before the tap is thrown away. Pressing the two keys in either order
 works (erase key first, then push to talk, also erases).
 
-**The safety rule.** Erase removes exactly what Sotto typed, from the same field it typed it
+**The safety rule.** Erase removes exactly what Mulligan typed, from the same field it typed it
 into, and only when that is proven by reading the text back, or, where the app cannot be
 read, when nothing that could have moved the caret has happened since. When in doubt it does
 nothing and the HUD says why. A refused erase costs the user a few keystrokes; a wrong one
@@ -1283,7 +1288,7 @@ enum EraseOutcome: Sendable, Equatable {
 
 /// What was last typed, captured by TextInjector at the moment the insert was confirmed.
 struct TypedDictation: Sendable {
-    let text: String             // exactly as delivered, including any leading space Sotto added
+    let text: String             // exactly as delivered, including any leading space Mulligan added
     let processID: pid_t         // captured before the insert began, not after
     let element: AXElementID?    // the focused element, when readable (CFEqual identity, see below)
     let window: AXElementID?     // the app's focused window, when readable
@@ -1302,7 +1307,7 @@ the controller activates) installs one passive `NSEvent.addGlobalMonitorForEvent
 [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel])` and observes
 `NSWorkspace.didActivateApplicationNotification` and `activeSpaceDidChangeNotification`.
 Each bumps `inputEpoch`. A global monitor is passive: it cannot delay anyone's typing, and
-AppKit does not deliver the app's own events to it; events Sotto posts to other apps still
+AppKit does not deliver the app's own events to it; events Mulligan posts to other apps still
 arrive, so they carry `SyntheticEvent.marker` (a fixed 64-bit value in `.eventSourceUserData`,
 set on the ⌘V events and every key this section posts) and do not bump the epoch. Accessibility
 covers global keyboard monitoring (Apple DTS); if the monitor cannot be installed, that is
@@ -1394,7 +1399,7 @@ enum ErasePlan: Equatable {
 **Executing.** All AX calls in this section and in `TextInjector` run under a process-wide
 `AXUIElementSetMessagingTimeout` of 1 s, set once at launch on the system-wide element (the
 default is about 6 s, which would freeze the main actor, the event tap and the controller's
-timers). Not shorter: the insert path shares it, and an AX write that times out on Sotto's
+timers). Not shorter: the insert path shares it, and an AX write that times out on Mulligan's
 side but still lands in a slow app would fall back to a paste and type the text twice.
 
 The eraser plans once (a refusal returns at once), then waits until the erase modifier is
@@ -1510,7 +1515,7 @@ readable (element, selection and preceding text all available).
 
 - `ErasePlanTests`: every rule in order, each as its own case: no record; superseded; other
   pid; readable same element with a caret match; a selection-equals-insert match; a leading
-  space Sotto added; different text; an NFC/NFD pair (refused, no normalisation); identical
+  space Mulligan added; different text; an NFC/NFD pair (refused, no normalisation); identical
   text in a different element ("Yes." erased nowhere else); a different window; a caret not at
   `caretEnd`; `preceding` nil at a field start; unreadable with epoch unchanged, epoch
   changed, window changed, a newline, 500 and 501 Characters; an emoji record (backspaces in
@@ -1551,7 +1556,7 @@ limit refuses; release during "Erasing…" erases without restarting.
 ## 7. Build, signing, permissions
 
 `make build` / `make test` / `make app` / `make run` / `make install` / `make clean`, see the
-Makefile. Build products and the staged bundle live in `~/Library/Caches/SottoBuild`, never
+Makefile. Build products and the staged bundle live in `~/Library/Caches/MulliganBuild`, never
 in the repo; a linked worktree gets its own stage under `worktrees/<name>` there. The bundle
 is signed with the first Developer ID Application identity found, with `--options runtime`
 and the entitlements file; `make app` fails rather than falling back to ad-hoc, because an
@@ -1579,8 +1584,8 @@ Milestone acceptance:
 | Milestone | Done when |
 |---|---|
 | A1 core loop | Every controller test in §6.7 passes. Running the app: hold the key, speak, release, and the log shows `listening for Right ⌥`, capture start with sample rates, analyzer start, capture stop, and `final transcript: N chars`. Holding Left Option while tapping Right Option still logs a release. A tap shorter than engine start-up logs no error and leaves `liveTaskCount` at zero (log it after every utterance). Quitting during a hold does not crash. |
-| A2 SottoText | `make test` passes every table row, rule case and guard case in §6.9. |
-| A3 SottoDictionary | `make test` passes every vector in `vectors.json` and every file, bias and warning test in §6.11. |
+| A2 MulliganText | `make test` passes every table row, rule case and guard case in §6.9. |
+| A3 MulliganDictionary | `make test` passes every vector in `vectors.json` and every file, bias and warning test in §6.11. |
 | A4 design tokens | `DS` compiles with every token named in §6.14, colours resolve in both appearances, and `TokenSheet` renders them. |
 | B1 pipeline | Every formatter test in §6.10 passes. Running the app: dictating into TextEdit uses the AX path; dictating into Terminal uses paste and the clipboard is restored; copying something else during the 500 ms window is not clobbered (log shows the skip); the run appears in `history.jsonl`; a dictionary correction fires and is recorded; a Record-button utterance is saved with source `button` and nothing is typed. |
 | B2 HUD | The HUD appears bottom-centre on press without the target field losing focus (dictation still lands), shows "Preparing…" then live text, stays visible through starting → listening → finishing without flicker, shows an error for its display duration, and disappears on idle. |
@@ -1593,13 +1598,13 @@ Batches run in order; agents within a batch run in parallel and own disjoint fil
 
 | Batch | Agent | Owns (creates or edits) | Depends on |
 |---|---|---|---|
-| A | A1 core loop | `Support/Settings.swift`, `Support/Permissions.swift`, `Core/HotkeyMonitor.swift`, `Core/AudioCapture.swift`, `Core/DictationController.swift`, `Speech/*`, `App/SottoApp.swift` (AppDelegate: activate, retry poll, prepare), `App/AppComposition.swift` (initial: logging `onFinalTranscript`), `Tests/SottoAppTests/Fakes.swift`, `Tests/SottoAppTests/DictationControllerTests.swift` | scaffold |
-| A | A2 text | `Sources/SottoText/*`, `Tests/SottoTextTests/*` | scaffold |
-| A | A3 dictionary | `Sources/SottoDictionary/*`, `Tests/SottoDictionaryTests/*` except `vectors.json` | scaffold + vectors |
+| A | A1 core loop | `Support/Settings.swift`, `Support/Permissions.swift`, `Core/HotkeyMonitor.swift`, `Core/AudioCapture.swift`, `Core/DictationController.swift`, `Speech/*`, `App/MulliganApp.swift` (AppDelegate: activate, retry poll, prepare), `App/AppComposition.swift` (initial: logging `onFinalTranscript`), `Tests/MulliganAppTests/Fakes.swift`, `Tests/MulliganAppTests/DictationControllerTests.swift` | scaffold |
+| A | A2 text | `Sources/MulliganText/*`, `Tests/MulliganTextTests/*` | scaffold |
+| A | A3 dictionary | `Sources/MulliganDictionary/*`, `Tests/MulliganDictionaryTests/*` except `vectors.json` | scaffold + vectors |
 | A | A4 tokens | `UI/DesignSystem.swift`, `UI/TokenSheet.swift` | scaffold |
-| B | B1 pipeline | `Core/UtterancePipeline.swift`, `Core/TextInjector.swift`, `Cleanup/*`, `Dictionary/DictionaryStore.swift`, `History/*`, `App/AppComposition.swift`, `Tests/SottoAppTests/FoundationModelFormatterTests.swift` | A1–A3 |
-| B | B2 HUD | `UI/HUDPanel.swift`, `UI/HUDView.swift`, `App/SottoApp.swift` (HUD create/present/dismiss only), tokens appended to `UI/DesignSystem.swift` if needed | A1, A4 |
-| C | C1 shell | `UI/MainWindow.swift`, `UI/HistoryPanel.swift`, `UI/DictionaryPanel.swift`, `UI/SettingsWindow.swift`, `UI/MenuBarContent.swift`, `UI/Components.swift`, `App/SottoApp.swift` (scenes, menu commands, reload-on-activate), tokens appended if needed | B1, B2 |
+| B | B1 pipeline | `Core/UtterancePipeline.swift`, `Core/TextInjector.swift`, `Cleanup/*`, `Dictionary/DictionaryStore.swift`, `History/*`, `App/AppComposition.swift`, `Tests/MulliganAppTests/FoundationModelFormatterTests.swift` | A1–A3 |
+| B | B2 HUD | `UI/HUDPanel.swift`, `UI/HUDView.swift`, `App/MulliganApp.swift` (HUD create/present/dismiss only), tokens appended to `UI/DesignSystem.swift` if needed | A1, A4 |
+| C | C1 shell | `UI/MainWindow.swift`, `UI/HistoryPanel.swift`, `UI/DictionaryPanel.swift`, `UI/SettingsWindow.swift`, `UI/MenuBarContent.swift`, `UI/Components.swift`, `App/MulliganApp.swift` (scenes, menu commands, reload-on-activate), tokens appended if needed | B1, B2 |
 | V | verifier | read-only review + `make test` + `make app` | C1 |
 
 Agents do not commit; the orchestrator commits after each batch. Agents must not edit
@@ -1633,7 +1638,7 @@ Things that look wrong and are not, or look fine and will bite:
 - Never build inside an iCloud-synced folder; the Makefile's scratch path exists for this.
 - A swallowed erase modifier must also have its up swallowed, even after push to talk is
   released, or apps see a Command or Option up with no down (§6.16).
-- Sotto's own ⌘V and backspaces reach the global input monitor; mark them with
+- Mulligan's own ⌘V and backspaces reach the global input monitor; mark them with
   `SyntheticEvent.marker` or the first backspace of an erase invalidates the record it is
   erasing (§6.16).
 - A long or multi-line paste into Claude Code collapses into a "[Pasted text]" placeholder
@@ -1646,8 +1651,8 @@ Things that look wrong and are not, or look fine and will bite:
   text (erase) must wait out `pasteCompletionDelay` on the mutation lane (§6.16).
 - Synchronous AX calls block the main actor, the event tap and every timer for up to about
   6 s on a hung target; set `AXUIElementSetMessagingTimeout` (§6.16), but not so short that
-  a slow app's insert times out on Sotto's side and is pasted a second time.
-- Matching text is not identity: "Yes." before the caret in another field is not Sotto's.
+  a slow app's insert times out on Mulligan's side and is pasted a second time.
+- Matching text is not identity: "Yes." before the caret in another field is not Mulligan's.
   Compare the focused element with `CFEqual` (§6.16).
 
 ## 11. Later

@@ -1,18 +1,18 @@
-# Sotto
+# Mulligan
 
 Push-to-talk dictation for macOS, on-device, native Swift 6. Read `docs/SPEC.md` before
 changing anything; it is the source of truth for v1 and every interface in it is a contract.
 
 ## Rules
 
-- **Clean room.** Sotto is written from the spec. Do not read, search, or copy code from
+- **Clean room.** Mulligan is written from the spec. Do not read, search, or copy code from
   any other dictation project, on this machine or elsewhere. Author prompts, test vectors
   and copy fresh.
-- **Build with `make`**, never bare `swift build`. Products live in `~/Library/Caches/SottoBuild`.
+- **Build with `make`**, never bare `swift build`. Products live in `~/Library/Caches/MulliganBuild`.
   `make test` runs the library tests; `make install` signs and installs to /Applications.
 - **Launch only from the main checkout.** `make run` and `make install` refuse to work in a
   linked worktree or with an overridden `STAGE`; a worktree builds and tests in its own
-  stage under `~/Library/Caches/SottoBuild/worktrees/`. Never `open` a staged `Sotto.app`
+  stage under `~/Library/Caches/MulliganBuild/worktrees/`. Never `open` a staged `Mulligan.app`
   by hand and never stage one anywhere else. Every opened copy registers with
   LaunchServices under the same bundle id, and while the Accessibility grant is missing
   each one pops the system prompt.
@@ -23,7 +23,7 @@ changing anything; it is the source of truth for v1 and every interface in it is
   the user re-grants it in System Settings. That command is the user's, never an agent's.
 - **Swift 6 language mode, strict concurrency.** `MainActor.assumeIsolated` is allowed in
   exactly one place: the C event-tap callback in `HotkeyMonitor`, with a comment.
-- **Tests first for the library targets** (`SottoText`, `SottoDictionary`). Confirm a new
+- **Tests first for the library targets** (`MulliganText`, `MulliganDictionary`). Confirm a new
   test fails before making it pass.
 - **Every failure is logged.** No `try?` without a log line. Non-user values are logged
   with `privacy: .public`. Transcript text is never logged; log its length.
