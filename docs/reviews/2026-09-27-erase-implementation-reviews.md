@@ -55,3 +55,26 @@ Round two found six of the eight fixes closed and three gaps in the fixes themse
 
 Round three confirmed A and B closed and no new P0 or P1 issues. It flagged the check order
 in the fallback (C), which 3820d7f closes.
+
+## Codex, round four (acceptance-stage changes)
+
+These were raised after hands-on acceptance changed the terminal path, added checked
+backspaces and the late-selection handling, and added the speech check. All were fixed
+test-first before merge.
+
+1. **P0.** A late selection was deleted without re-checking its text. Fixed: the
+   `isStillOurSelection` check now runs before `deleteSelection`.
+2. **P0.** A selection request left pending could land in the middle of the backspaces.
+   Fixed:
+   - A field whose selection is not settable gets checked backspaces, and no selection is
+     ever requested there.
+   - A field that is settable but never applies the selection, even late, is refused.
+   - Checked backspaces go one key at a time.
+3. **P0.** Treating whole terminal apps as unreadable stripped the protections from their
+   real text fields. Fixed: only the terminal screen is special (by role), and it keeps its
+   element and window identity.
+4. **P0.** Unverified backspaces could carry on into another window. Fixed:
+   `identityHolds` is checked before every burst, and a window that cannot be read now
+   fails closed.
+5. **P0, speech branch.** A quick word spoken only in the first window was dropped. Fixed:
+   the first window is ignored only when the start sound played.
