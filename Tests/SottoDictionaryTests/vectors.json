@@ -699,5 +699,24 @@
         "count": 1
       }
     ]
+  },
+  {
+    "name": "already-present target found through an expanding case fold is not duplicated",
+    "entries": [
+      {
+        "kind": "correction",
+        "hear": "cloud",
+        "write": "Cloud Stra\u00dfe"
+      }
+    ],
+    "input": "Open Cloud STRASSE now",
+    "expected": "Open Cloud Stra\u00dfe now",
+    "applied": [
+      {
+        "from": "Cloud STRASSE",
+        "to": "Cloud Stra\u00dfe",
+        "count": 1
+      }
+    ]
   }
 ]

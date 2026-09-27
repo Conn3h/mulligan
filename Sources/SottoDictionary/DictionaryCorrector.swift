@@ -264,10 +264,12 @@ public struct DictionaryCorrector: Sendable {
         write: String
     ) -> Range<String.Index>? {
         guard !write.isEmpty else { return nil }
-        guard let end = text.index(start, offsetBy: write.count, limitedBy: text.endIndex),
-              end > matchEnd
+        // Search rather than slice `write.count` characters: a case fold can change the
+        // length ("Straße" matches "STRASSE").
+        guard let found = text.range(of: write, options: [.caseInsensitive, .anchored], range: start..<text.endIndex),
+              found.upperBound > matchEnd
         else { return nil }
-        guard String(text[start..<end]).caseInsensitiveCompare(write) == .orderedSame else { return nil }
+        let end = found.upperBound
         if end < text.endIndex, isFenceBreaker(text[end]) { return nil }
         return start..<end
     }
