@@ -263,22 +263,42 @@ between holds the tap could get a stale format, and one failed start poisoned ev
 press until relaunch. The new engine costs a few milliseconds, logged alongside the native
 and engine sample rates.
 
-`start()` also registers for `.AVAudioEngineConfigurationChange`, before starting the
-engine and keyed by a per-start token (a new engine can reuse an old one's address). The
-observer runs on the posting thread (`queue: nil`) and only enqueues the handler on a
-private serial queue: an observer registered *with* a queue makes the poster wait for it,
-and the handler takes the lock `start()` holds while the engine may be posting. The engine stops itself on a device connect, disconnect, or a
-Bluetooth profile switch; the handler re-installs the tap on the input's new native format
-and restarts the engine, so a change mid-hold costs a moment of audio rather than the rest
-of the utterance. If the restart itself fails, capture tears itself down and calls
+A start that fails because the input is mid-switch (`inputNotReady`, or a CoreAudio error
+such as −10868 or 560227702 "cannot perform IO") is **retried on a fresh engine**, up to
+four attempts 150 ms apart; a leftover CoreAudio error is reported as `inputNotReady` ("The
+microphone is still switching. Try again.") rather than as an error code. Before installing
+the tap, the input node's rate is compared with the hardware's (`inputFormat(forBus:)`): a
+mismatch means the device is still switching, and installing the tap then raises an
+Objective-C exception Swift cannot catch (turning Bluetooth off mid-dictation crashed the app
+this way), so it throws `inputNotReady` instead.
+
+Each engine registers for `.AVAudioEngineConfigurationChange` with its own id. The observer
+runs on the posting thread (`queue: nil`) and only enqueues the handler on a private serial
+queue: an observer registered *with* a queue makes the poster wait for it, and the handler
+takes the capture lock. The engine stops itself on a device connect, disconnect, or a
+Bluetooth profile switch; the handler tears that engine down and moves capture to a **fresh
+engine** on the current input (the old one keeps reporting the previous device's format),
+with the same four-attempt retry, so a change mid-hold costs a moment of audio rather than
+the rest of the utterance. Each attempt builds its engine under the lock, but the delay
+between attempts is spent outside it, so a `stop()` waits for at most one engine build; a
+restart whose capture was stopped meanwhile is abandoned.
+
+A **silence check** runs every 0.35 s on the same queue: buffers flow even in silence, so an
+engine that has delivered none 0.7 s after starting, or none for 1 s since the last, is dead
+(an engine started on a device mid-switch can run without delivering anything and without a
+configuration change) and is moved to a fresh engine the same way. After three such
+restarts, or when a restart exhausts its attempts, capture tears itself down and calls
 `onInterruption(microphoneChangedMessage)` ("The microphone changed and could not be
-restarted. Try again.") instead of leaving the utterance listening to silence; the
-controller ends the utterance as a release and then shows that message (§6.7).
+restarted. Try again."); the controller ends the utterance as a release, delivering what was
+said, and then shows that message (§6.7). Engine and restart ids make a stale notification
+or silence check for a replaced engine a no-op.
 
 **No mutable state is shared with the audio thread.** `start()` builds one immutable
-`Session` value (converter, output format, `onBuffer`, `onLevel`) and the tap closure
-captures that value; the class itself holds only the running engine, the output format, all
-three callbacks, and the configuration-change observer, bundled in one `Running` value
+`Session` value (converter, output format, a buffer clock, `onBuffer`, `onLevel`) and the
+tap closure captures that value; the only thing the audio thread writes is the buffer
+clock's atomic timestamp, read by the silence check. The class itself holds the live engine
+and its observer, the output format, all three callbacks, and the current engine or restart
+id, bundled in one `Running` value
 behind a `Synchronization.Mutex` (as built: the protocol requires `Sendable` and unchecked
 conformance is forbidden). `stop()` removes the tap, stops the engine, and removes the
 observer; a callback already in flight completes against its own captured session and its
