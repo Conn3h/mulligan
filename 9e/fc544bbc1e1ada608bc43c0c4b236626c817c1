@@ -1,0 +1,19 @@
+Sources/Sotto/Core/AudioCapture.swift
+  s_167e1562cc51b5::t_dfda75555a4651 85-88,126-130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "9efc544bbc1e1ada608bc43c0c4b236626c817c1",
+  "prompts": {},
+  "sessions": {
+    "s_167e1562cc51b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d9572c79-e728-4fc6-a74b-433213ba5609",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
