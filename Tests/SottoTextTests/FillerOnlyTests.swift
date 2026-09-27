@@ -10,7 +10,7 @@ struct FillerOnlyTests {
     }
 
     /// Short real words must never be dropped.
-    @Test(arguments: ["Yes.", "No.", "Okay.", "Done.", "Yeah.", "Go ahead.", "Mm, yes.", "Um, okay", "Hmmus", "Mom.", "I'm."])
+    @Test(arguments: ["Yes.", "No.", "Okay.", "Done.", "Yeah.", "Go ahead.", "Mm, yes.", "Um, okay", "Hmmus", "Mom.", "I'm.", "Um, 42.", "10 mm", "Mm 3", "Hmm, 50%"])
     func anyRealWordIsNotFillerOnly(text: String) {
         #expect(!FillerOnly.matches(text))
     }

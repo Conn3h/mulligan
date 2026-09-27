@@ -7,11 +7,12 @@ public enum FillerOnly {
     private static let fillers: Set<String> = ["hmm", "hm", "mhm", "uh", "um", "erm", "uhm", "er", "ah", "eh"]
 
     /// True when `text` has at least one word and every word is a filler. Words are split on
-    /// whitespace and hyphens ("Mm-hmm") with surrounding punctuation dropped.
+    /// whitespace and hyphens ("Mm-hmm") with surrounding punctuation trimmed; a word that
+    /// still holds a digit or symbol ("42", "50%") is content, never filler.
     public static func matches(_ text: String) -> Bool {
         let words = text
             .split(whereSeparator: { $0.isWhitespace || $0 == "-" })
-            .map { $0.filter(\.isLetter).lowercased() }
+            .map { $0.trimmingCharacters(in: .punctuationCharacters).lowercased() }
             .filter { !$0.isEmpty }
         guard !words.isEmpty else {
             return false
@@ -21,6 +22,9 @@ public enum FillerOnly {
 
     /// "m", "mm", "mmm" and the fixed set; "hmmm" and "uhhh" style stretches count too.
     private static func isFiller(_ word: String) -> Bool {
+        guard word.allSatisfy(\.isLetter) else {
+            return false
+        }
         if word.allSatisfy({ $0 == "m" }) {
             return true
         }
