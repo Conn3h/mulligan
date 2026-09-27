@@ -1,0 +1,25 @@
+Tests/SottoAppTests/Fakes.swift
+  s_167e1562cc51b5::t_eb1d1667e823e7 144-145,154,158-163,170,181-186,226-236,375-377,412-414
+Tests/SottoAppTests/DictationOrderTests.swift
+  s_167e1562cc51b5::t_a9cd602abf8c77 613,618,622,627
+  s_167e1562cc51b5::t_1056e6fd8cee0e 399-400,402-403
+  s_167e1562cc51b5::t_397418714a3c89 1-38,40-398,401,404-602,638-795
+  s_167e1562cc51b5::t_72d13b0b5cfdee 603-612,614-617,619-621,623-626,628-637
+  s_167e1562cc51b5::t_79922d6fa223d0 39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "06b2277440682ebd5b116b1b1accfe38c64d2719",
+  "prompts": {},
+  "sessions": {
+    "s_167e1562cc51b5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d9572c79-e728-4fc6-a74b-433213ba5609",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Conrad <conne_95@msn.com>"
+    }
+  }
+}
